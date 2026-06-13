@@ -2,8 +2,7 @@ import subprocess
 import sys
 
 
-def test_cancel_kills_process(leike):
-    app = leike["App"]()
+def test_cancel_kills_process(app):
     p = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
     try:
         app.export_proc = p
@@ -15,4 +14,3 @@ def test_cancel_kills_process(leike):
     finally:
         if p.poll() is None:
             p.kill()
-        app.destroy()
