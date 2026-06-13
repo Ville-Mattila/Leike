@@ -11,6 +11,7 @@ No third-party Python packages needed - uses only the standard library.
 import os
 import re
 import sys
+import glob
 import json
 import shutil
 import subprocess
@@ -59,6 +60,15 @@ ASPECTS = [
     ("1:1 (Square)", 1.0),
     ("4:5 (Portrait)", 4 / 5),
     ("16:9 (Landscape)", 16 / 9),
+]
+
+# Target-size presets: label -> max MB (None = off, "custom" = use the entry).
+SIZE_TARGETS = [
+    ("Off", None),
+    ("8 MB", 8.0),
+    ("10 MB", 10.0),
+    ("25 MB", 25.0),
+    ("Custom…", "custom"),
 ]
 
 # Output formats: label -> ExportSettings.fmt value.
@@ -176,6 +186,7 @@ class ExportSettings:
     fast_trim: bool = True          # allow lossless -c copy for trim-only jobs
     hw: bool = False                # GPU encode (h264_nvenc) instead of libx264
     gif_fps: int = 15               # frame rate for GIF output
+    target_size_mb: float | None = None  # two-pass to hit a max file size (mp4)
 
 
 def _out_dims(s):
@@ -225,6 +236,7 @@ def _is_passthrough(s):
     a lossless stream copy. getattr() keeps this forward-compatible as later
     phases add transform/audio fields."""
     return (getattr(s, "fast_trim", True)
+            and not getattr(s, "target_size_mb", None)
             and s.crop is None and s.scale_cap is None and s.fmt == "mp4"
             and not getattr(s, "rotate", 0)
             and not getattr(s, "flip_h", False)
@@ -247,6 +259,25 @@ def _venc(s):
     return ["-c:v", "libx264", "-preset", "medium", "-crf", str(s.crf)]
 
 
+def _size_target_passes(s):
+    """Two-pass libx264 sized to hit s.target_size_mb (audio at 128 kbit/s)."""
+    dur = max(0.001, s.end - s.start)
+    total_kbit = (s.target_size_mb * 8192) / dur
+    audio_kbit = 0 if getattr(s, "audio_only", False) else 128
+    vbit = max(64, int((total_kbit - audio_kbit) * 0.97))   # 3% mux headroom
+    log = s.output_path + ".2pass"
+    null = "NUL" if os.name == "nt" else "/dev/null"
+    common = ["-ss", f"{s.start:.3f}", "-i", s.input_path, "-t", f"{dur:.3f}",
+              "-vf", ",".join(_video_filters(s)),
+              "-c:v", "libx264", "-b:v", f"{vbit}k"]
+    p1 = [FFMPEG, "-y", *common, "-pass", "1", "-passlogfile", log,
+          "-an", "-f", "mp4", null]
+    p2 = [FFMPEG, "-y", *common, "-pass", "2", "-passlogfile", log,
+          "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart",
+          s.output_path]
+    return [p1, p2]
+
+
 def build_commands(s):
     """Return a list of ffmpeg command arg-lists (one or more passes)."""
     dur = max(0.001, s.end - s.start)
@@ -261,6 +292,8 @@ def build_commands(s):
                  "-c:a", "libopus", "-b:a", "128k", s.output_path]]
 
     # mp4
+    if s.target_size_mb:
+        return _size_target_passes(s)
     if _is_passthrough(s):
         return [[FFMPEG, "-y", *common, "-c", "copy", "-movflags", "+faststart",
                  s.output_path]]
@@ -686,6 +719,44 @@ class App(BaseTk):
             ttk.Label(box, text="(no NVENC GPU detected)",
                       foreground=MUTED).grid(row=2, column=0, sticky="w")
 
+        size_box = ttk.Frame(box)
+        size_box.grid(row=3, column=0, sticky="w", pady=(8, 0))
+        ttk.Label(size_box, text="Target file size (MP4)").grid(
+            row=0, column=0, columnspan=3, sticky="w")
+        self.size_var = tk.StringVar(value=SIZE_TARGETS[0][0])
+        size_cb = ttk.Combobox(
+            size_box, textvariable=self.size_var, state="readonly",
+            values=[s[0] for s in SIZE_TARGETS], width=10)
+        size_cb.grid(row=1, column=0, sticky="w")
+        size_cb.bind("<<ComboboxSelected>>", lambda _e: self._on_size_change())
+        self.size_custom_var = tk.StringVar(value="")
+        self.size_custom = ttk.Entry(size_box, textvariable=self.size_custom_var,
+                                     width=6)
+        self.size_custom.bind("<KeyRelease>",
+                              lambda _e: self._update_export_hint())
+        self.size_mb_lbl = ttk.Label(size_box, text="MB")
+
+    def _on_size_change(self):
+        if dict(SIZE_TARGETS)[self.size_var.get()] == "custom":
+            self.size_custom.grid(row=1, column=1, padx=(6, 0))
+            self.size_mb_lbl.grid(row=1, column=2, padx=(2, 0))
+        else:
+            self.size_custom.grid_remove()
+            self.size_mb_lbl.grid_remove()
+        self._update_export_hint()
+
+    def _target_mb(self):
+        v = dict(SIZE_TARGETS)[self.size_var.get()]
+        if v is None:
+            return None
+        if v == "custom":
+            try:
+                mb = float(self.size_custom_var.get())
+                return mb if mb > 0 else None
+            except ValueError:
+                return None
+        return v
+
     def _on_crf(self, _v):
         self.crf_label.config(text=str(self.crf_var.get()))
 
@@ -710,6 +781,9 @@ class App(BaseTk):
             self.export_hint.config(text=f"GIF · {s.gif_fps} fps (2-pass palette)")
         elif s.fmt == "webm":
             self.export_hint.config(text="WebM (VP9)")
+        elif s.target_size_mb:
+            self.export_hint.config(
+                text=f"Target {s.target_size_mb:g} MB (H.264 · 2-pass)")
         elif _is_passthrough(s):
             self.export_hint.config(text="⚡ Lossless fast trim (no re-encode)")
         elif s.hw:
@@ -1099,7 +1173,7 @@ class App(BaseTk):
             scale_cap=dict(SCALE_OPTIONS)[self.scale_var.get()],
             crf=self.crf_var.get(), fmt=dict(FORMATS)[self.fmt_var.get()],
             fast_trim=self.fast_trim_var.get(), hw=self.hw_var.get(),
-            gif_fps=self.gif_fps_var.get())
+            gif_fps=self.gif_fps_var.get(), target_size_mb=self._target_mb())
 
     def export(self):
         if not self.input_path:
@@ -1172,6 +1246,13 @@ class App(BaseTk):
         self.export_btn.config(state="normal")
         if getattr(self, "cancel_btn", None):
             self.cancel_btn.config(state="disabled")
+        # Remove any two-pass log files left by a size-targeted export.
+        if out:
+            for f in glob.glob(out + ".2pass*"):
+                try:
+                    os.remove(f)
+                except OSError:
+                    pass
         if ok:
             self.progress["value"] = 100
             self.status_label.config(text="Done.")

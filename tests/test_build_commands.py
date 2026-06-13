@@ -79,3 +79,19 @@ def test_webm_vp9_opus(leike):
     j = " ".join(cmds[0])
     assert "libvpx-vp9" in j and "libopus" in j
     assert "-c copy" not in j        # webm always re-encodes, even trim-only
+
+
+def test_size_target_two_pass(leike):
+    cmds = leike["build_commands"](make(leike, target_size_mb=10.0))   # 3.0s clip
+    assert len(cmds) == 2
+    j0, j1 = " ".join(cmds[0]), " ".join(cmds[1])
+    assert "-pass 1" in j0 and "-pass 2" in j1
+    expected = int(((10.0 * 8192) / 3.0 - 128) * 0.97)
+    assert f"-b:v {expected}k" in j1
+
+
+def test_size_target_overrides_passthrough(leike):
+    # no crop would normally be a -c copy passthrough; a size target forces 2-pass
+    cmds = leike["build_commands"](make(leike, target_size_mb=5.0))
+    assert len(cmds) == 2
+    assert "-c copy" not in " ".join(cmds[0])
