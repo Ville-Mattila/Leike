@@ -93,6 +93,20 @@ FFMPEG = tool_path("ffmpeg")
 FFPROBE = tool_path("ffprobe")
 
 
+def resource_path(name):
+    """Locate a bundled data file (e.g. the window icon)."""
+    if getattr(sys, "_MEIPASS", None):
+        bundled = os.path.join(sys._MEIPASS, name)
+        if os.path.exists(bundled):
+            return bundled
+    base = (os.path.dirname(sys.executable) if getattr(sys, "frozen", False)
+            else os.path.dirname(os.path.abspath(__file__)))
+    return os.path.join(base, name)
+
+
+ICON_FILE = resource_path("leike.ico")
+
+
 def run_capture(cmd):
     return subprocess.run(
         cmd, capture_output=True, text=True, creationflags=NO_WINDOW
@@ -139,6 +153,11 @@ class App(BaseTk):
         super().__init__()
         self.title("Leike")
         self.resizable(False, False)
+        try:
+            if os.path.exists(ICON_FILE):
+                self.iconbitmap(ICON_FILE)
+        except Exception:
+            pass
 
         # --- source video state ---
         self.input_path = None

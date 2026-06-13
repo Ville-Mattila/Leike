@@ -2,7 +2,7 @@
 ; Build with Build-installer.bat (which populates the staging\ folder first).
 
 #define MyAppName "Leike"
-#define MyAppVersion "1.4"
+#define MyAppVersion "1.5"
 #define MyAppPublisher "Ville Mattila"
 #define MyAppURL "https://github.com/Ville-Mattila/Leike"
 #define MyAppExeName "Leike.exe"
@@ -28,6 +28,7 @@ SolidCompression=yes
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
 WizardStyle=modern
+SetupIconFile=..\leike.ico
 UninstallDisplayIcon={app}\{#MyAppExeName}
 
 [Languages]
