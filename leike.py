@@ -78,6 +78,12 @@ FORMATS = [
     ("WebM (VP9)", "webm"),
 ]
 
+# Speed presets: label -> playback-rate multiplier.
+SPEEDS = [("0.25×", 0.25), ("0.5×", 0.5), ("1×", 1.0), ("2×", 2.0), ("4×", 4.0)]
+
+# Aspect-fill modes: label -> ExportSettings.fill_mode value.
+FILL_MODES = [("Crop to fit", "crop"), ("Blurred background", "blur_pad")]
+
 # Downscale options: label -> max length of the longest side (None = original).
 SCALE_OPTIONS = [
     ("Original", None),
@@ -190,6 +196,17 @@ class ExportSettings:
     mute: bool = False              # drop the audio track
     volume: float = 1.0             # audio gain (1.0 = unchanged)
     audio_only: bool = False        # export audio as MP3, no video
+    rotate: int = 0                 # 0/90/180/270 clockwise
+    flip_h: bool = False            # mirror horizontally
+    flip_v: bool = False            # mirror vertically
+    speed: float = 1.0              # playback speed (2.0 = 2x faster)
+    fade_in: float = 0.0            # seconds of fade-from-black at the start
+    fade_out: float = 0.0           # seconds of fade-to-black at the end
+    fill_mode: str = "crop"         # "crop" | "blur_pad" (aspect conversion)
+    target_aspect: float | None = None   # w/h for blur_pad
+    reverse: bool = False           # play backwards
+    boomerang: bool = False         # forward then backward
+    loop: int = 0                   # repeat the clip N times (0/1 = once)
 
 
 def _out_dims(s):
@@ -202,27 +219,188 @@ def _out_dims(s):
     return max(2, w), max(2, h)
 
 
-def _geom_filters(s):
-    """crop + optional downscale (no pixel-format); shared by all formats."""
-    chain = []
+def _crop_filter(s):
     if s.crop:
         x, y, w, h = s.crop
-        chain.append(f"crop={even(w)}:{even(h)}:{even(x)}:{even(y)}")
+        return [f"crop={even(w)}:{even(h)}:{even(x)}:{even(y)}"]
+    return []
+
+
+def _orient_filters(s):
+    out = []
+    r = getattr(s, "rotate", 0) % 360
+    if r == 90:
+        out.append("transpose=1")
+    elif r == 180:
+        out += ["transpose=1", "transpose=1"]
+    elif r == 270:
+        out.append("transpose=2")
+    if getattr(s, "flip_h", False):
+        out.append("hflip")
+    if getattr(s, "flip_v", False):
+        out.append("vflip")
+    return out
+
+
+def _speed_filter(s):
+    sp = getattr(s, "speed", 1.0)
+    return [f"setpts={1.0 / sp:.4f}*PTS"] if sp != 1.0 else []
+
+
+def _scale_filter(s):
     ow, oh = _out_dims(s)
     cw = even(s.crop[2]) if s.crop else even(s.src_w)
     ch = even(s.crop[3]) if s.crop else even(s.src_h)
-    if (ow, oh) != (cw, ch):
-        chain.append(f"scale={ow}:{oh}:flags=lanczos")
+    return [f"scale={ow}:{oh}:flags=lanczos"] if (ow, oh) != (cw, ch) else []
+
+
+def _fade_filters(s):
+    out = []
+    od = (s.end - s.start) / (getattr(s, "speed", 1.0) or 1.0)
+    fi = getattr(s, "fade_in", 0.0) or 0.0
+    fo = getattr(s, "fade_out", 0.0) or 0.0
+    if fi > 0:
+        out.append(f"fade=t=in:st=0:d={fi:.2f}")
+    if fo > 0:
+        out.append(f"fade=t=out:st={max(0.0, od - fo):.2f}:d={fo:.2f}")
+    return out
+
+
+def _atempo_chain(speed):
+    out, r = [], speed
+    while r > 2.0:
+        out.append("atempo=2.0")
+        r /= 2.0
+    while r < 0.5:
+        out.append("atempo=0.5")
+        r *= 2.0
+    out.append(f"atempo={r:.4f}")
+    return out
+
+
+def _linear_video(s, with_scale=True):
+    """Linear video filters: crop, orient, speed, scale, fade, reverse."""
+    chain = _crop_filter(s) + _orient_filters(s) + _speed_filter(s)
+    if with_scale:
+        chain += _scale_filter(s)
+    chain += _fade_filters(s)
+    if getattr(s, "reverse", False):
+        chain.append("reverse")
     return chain
 
 
-def _video_filters(s):
-    return _geom_filters(s) + ["format=yuv420p"]
+def _blurpad_dims(s):
+    sh = even(s.crop[3]) if s.crop else even(s.src_h)
+    w, h = even(sh * s.target_aspect), sh
+    if s.scale_cap and max(w, h) > s.scale_cap:
+        f = s.scale_cap / max(w, h)
+        w, h = even(w * f), even(h * f)
+    return max(2, w), max(2, h)
+
+
+def _is_complex(s):
+    """True when the video pipeline needs -filter_complex (splits/concat)."""
+    return bool((getattr(s, "fill_mode", "crop") == "blur_pad"
+                 and getattr(s, "target_aspect", None))
+                or getattr(s, "boomerang", False)
+                or (getattr(s, "loop", 0) or 0) > 1)
+
+
+def _video_graph(s, add_format=True):
+    """Return (flag, value, out_label). flag is '-vf' (label None) or
+    '-filter_complex' (label like '[v3]')."""
+    if not _is_complex(s):
+        chain = _linear_video(s)
+        if add_format:
+            chain.append("format=yuv420p")
+        return ("-vf", ",".join(chain) if chain else "null", None)
+
+    segs, idx = [], [0]
+
+    def lab():
+        idx[0] += 1
+        return f"v{idx[0]}"
+
+    cur = "0:v"
+    pre = _crop_filter(s) + _orient_filters(s) + _speed_filter(s)
+    if getattr(s, "fill_mode", "crop") == "blur_pad" and s.target_aspect:
+        w, h = _blurpad_dims(s)
+        prestr = (",".join(pre) + ",") if pre else ""
+        segs.append(f"[{cur}]{prestr}split=2[bg][fg]")
+        segs.append(f"[bg]scale={w}:{h}:force_original_aspect_ratio=increase,"
+                    f"crop={w}:{h},gblur=sigma=20[bgb]")
+        segs.append(f"[fg]scale={w}:{h}:force_original_aspect_ratio=decrease[fgs]")
+        o = lab()
+        segs.append(f"[bgb][fgs]overlay=(W-w)/2:(H-h)/2[{o}]")
+        cur = o
+    else:
+        chain = pre + _scale_filter(s)
+        o = lab()
+        segs.append(f"[{cur}]{','.join(chain) if chain else 'null'}[{o}]")
+        cur = o
+
+    post = _fade_filters(s)
+    if getattr(s, "reverse", False):
+        post.append("reverse")
+    if post:
+        o = lab()
+        segs.append(f"[{cur}]{','.join(post)}[{o}]")
+        cur = o
+
+    if getattr(s, "boomerang", False):
+        o = lab()
+        segs.append(f"[{cur}]split=2[ba][bb];[bb]reverse[br];"
+                    f"[ba][br]concat=n=2:v=1[{o}]")
+        cur = o
+    elif (getattr(s, "loop", 0) or 0) > 1:
+        n = s.loop
+        ls = [f"lc{i}" for i in range(n)]
+        o = lab()
+        segs.append(f"[{cur}]split={n}" + "".join(f"[{x}]" for x in ls) + ";"
+                    + "".join(f"[{x}]" for x in ls) + f"concat=n={n}:v=1[{o}]")
+        cur = o
+
+    if add_format:
+        o = lab()
+        segs.append(f"[{cur}]format=yuv420p[{o}]")
+        cur = o
+    return ("-filter_complex", ";".join(segs), f"[{cur}]")
+
+
+def _af_chain(s):
+    """Audio filters for the linear path: volume, atempo (speed), areverse."""
+    af = []
+    if not getattr(s, "mute", False) and getattr(s, "volume", 1.0) != 1.0:
+        af.append(f"volume={s.volume:.3f}")
+    if getattr(s, "speed", 1.0) != 1.0:
+        af += _atempo_chain(s.speed)
+    if getattr(s, "reverse", False):
+        af.append("areverse")
+    return af
+
+
+def _av_reencode(s, vcodec, acodec, abr, extra_v=()):
+    """Video + audio args for a re-encode, choosing -vf vs -filter_complex."""
+    flag, fval, vmap = _video_graph(s)
+    if vmap:  # filter_complex: explicit maps; audio passes through (or muted)
+        args = [flag, fval, "-map", vmap, *vcodec, *extra_v]
+        if not getattr(s, "mute", False):
+            args += ["-map", "0:a?", "-c:a", acodec, "-b:a", abr]
+    else:     # -vf: audio auto-mapped; filter with -af
+        args = [flag, fval, *vcodec, *extra_v]
+        if getattr(s, "mute", False):
+            args += ["-an"]
+        else:
+            af = _af_chain(s)
+            if af:
+                args += ["-af", ",".join(af)]
+            args += ["-c:a", acodec, "-b:a", abr]
+    return args
 
 
 def _gif_passes(s):
     """GIF via two passes: build an optimal palette, then render with it."""
-    pre = ",".join(_geom_filters(s) + [f"fps={s.gif_fps}"])
+    pre = ",".join(_linear_video(s) + [f"fps={s.gif_fps}"])
     dur = max(0.001, s.end - s.start)
     palette = os.path.join(tempfile.gettempdir(), f"leike_pal_{os.getpid()}.png")
     p1 = [FFMPEG, "-y", "-ss", f"{s.start:.3f}", "-i", s.input_path,
@@ -271,28 +449,22 @@ def _size_target_passes(s):
     vbit = max(64, int((total_kbit - audio_kbit) * 0.97))   # 3% mux headroom
     log = s.output_path + ".2pass"
     null = "NUL" if os.name == "nt" else "/dev/null"
-    common = ["-ss", f"{s.start:.3f}", "-i", s.input_path, "-t", f"{dur:.3f}",
-              "-vf", ",".join(_video_filters(s)),
-              "-c:v", "libx264", "-b:v", f"{vbit}k"]
-    p1 = [FFMPEG, "-y", *common, "-pass", "1", "-passlogfile", log,
+    flag, fval, vmap = _video_graph(s)
+    inp = ["-ss", f"{s.start:.3f}", "-i", s.input_path, "-t", f"{dur:.3f}"]
+    vbase = [flag, fval] + (["-map", vmap] if vmap else []) \
+        + ["-c:v", "libx264", "-b:v", f"{vbit}k"]
+    p1 = [FFMPEG, "-y", *inp, *vbase, "-pass", "1", "-passlogfile", log,
           "-an", "-f", "mp4", null]
-    p2 = [FFMPEG, "-y", *common, "-pass", "2", "-passlogfile", log,
-          *_audio_filter(s), *_audio_codec(s, "aac", "128k"),
-          "-movflags", "+faststart", s.output_path]
+    if s.mute:
+        a2 = ["-an"]
+    elif vmap:
+        a2 = ["-map", "0:a?", "-c:a", "aac", "-b:a", "128k"]
+    else:
+        a2 = (["-af", ",".join(_af_chain(s))] if _af_chain(s) else []) \
+            + ["-c:a", "aac", "-b:a", "128k"]
+    p2 = [FFMPEG, "-y", *inp, *vbase, "-pass", "2", "-passlogfile", log,
+          *a2, "-movflags", "+faststart", s.output_path]
     return [p1, p2]
-
-
-def _audio_filter(s):
-    """`-af volume=...` (skipped when muted or at unity gain)."""
-    if not getattr(s, "mute", False) and getattr(s, "volume", 1.0) != 1.0:
-        return ["-af", f"volume={s.volume:.3f}"]
-    return []
-
-
-def _audio_codec(s, codec, bitrate):
-    if getattr(s, "mute", False):
-        return ["-an"]
-    return ["-c:a", codec, "-b:a", bitrate]
 
 
 def build_commands(s):
@@ -301,16 +473,18 @@ def build_commands(s):
     common = ["-ss", f"{s.start:.3f}", "-i", s.input_path, "-t", f"{dur:.3f}"]
 
     if getattr(s, "audio_only", False):
-        return [[FFMPEG, "-y", *common, "-vn", *_audio_filter(s),
+        af = _af_chain(s)
+        extra = ["-af", ",".join(af)] if af else []
+        return [[FFMPEG, "-y", *common, "-vn", *extra,
                  "-c:a", "libmp3lame", "-q:a", "2", s.output_path]]
 
     if s.fmt == "gif":
         return _gif_passes(s)
 
     if s.fmt == "webm":
-        return [[FFMPEG, "-y", *common, "-vf", ",".join(_video_filters(s)),
-                 "-c:v", "libvpx-vp9", "-crf", str(s.crf), "-b:v", "0",
-                 *_audio_filter(s), *_audio_codec(s, "libopus", "128k"),
+        return [[FFMPEG, "-y", *common,
+                 *_av_reencode(s, ["-c:v", "libvpx-vp9", "-crf", str(s.crf),
+                                   "-b:v", "0"], "libopus", "128k"),
                  s.output_path]]
 
     # mp4
@@ -319,9 +493,10 @@ def build_commands(s):
     if _is_passthrough(s):
         return [[FFMPEG, "-y", *common, "-c", "copy", "-movflags", "+faststart",
                  s.output_path]]
-    return [[FFMPEG, "-y", *common, "-vf", ",".join(_video_filters(s)), *_venc(s),
-             "-pix_fmt", "yuv420p", "-movflags", "+faststart",
-             *_audio_filter(s), *_audio_codec(s, "aac", "128k"), s.output_path]]
+    return [[FFMPEG, "-y", *common,
+             *_av_reencode(s, _venc(s), "aac", "128k",
+                           extra_v=["-pix_fmt", "yuv420p"]),
+             "-movflags", "+faststart", s.output_path]]
 
 
 class App(BaseTk):
@@ -606,6 +781,7 @@ class App(BaseTk):
         self.advanced = ttk.Frame(right)
         self._build_encoding_panel(self.advanced)
         self._build_audio_panel(self.advanced)
+        self._build_transform_panel(self.advanced)
 
     def _build_crop_panel(self, parent):
         box = ttk.LabelFrame(parent, text="Crop", padding=8)
@@ -804,6 +980,75 @@ class App(BaseTk):
 
     def _on_volume(self, _v):
         self.volume_label.config(text=f"{self.volume_var.get()}%")
+
+    def _build_transform_panel(self, parent):
+        box = ttk.LabelFrame(parent, text="Transform", padding=8)
+        box.grid(row=2, column=0, sticky="ew", pady=(0, 10))
+        hint = self._update_export_hint
+
+        self.rotate_val = 0
+        rrow = ttk.Frame(box)
+        rrow.grid(row=0, column=0, columnspan=2, sticky="w")
+        ttk.Button(rrow, text="⟲", width=3,
+                   command=lambda: self._rotate(-90)).grid(row=0, column=0)
+        ttk.Button(rrow, text="⟳", width=3,
+                   command=lambda: self._rotate(90)).grid(row=0, column=1,
+                                                          padx=(2, 6))
+        self.rotate_label = ttk.Label(rrow, text="0°", width=4)
+        self.rotate_label.grid(row=0, column=2)
+        self.flip_h_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(rrow, text="Mirror H", variable=self.flip_h_var,
+                        command=hint).grid(row=0, column=3, padx=(6, 0))
+        self.flip_v_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(rrow, text="Mirror V", variable=self.flip_v_var,
+                        command=hint).grid(row=0, column=4, padx=(6, 0))
+
+        ttk.Label(box, text="Speed").grid(row=1, column=0, sticky="w",
+                                          pady=(6, 0))
+        self.speed_var = tk.StringVar(value="1×")
+        sc = ttk.Combobox(box, textvariable=self.speed_var, state="readonly",
+                          width=8, values=[s[0] for s in SPEEDS])
+        sc.grid(row=1, column=1, sticky="w", pady=(6, 0))
+        sc.bind("<<ComboboxSelected>>", lambda _e: hint())
+
+        frow = ttk.Frame(box)
+        frow.grid(row=2, column=0, columnspan=2, sticky="w", pady=(6, 0))
+        ttk.Label(frow, text="Fade in").grid(row=0, column=0)
+        self.fade_in_var = tk.StringVar(value="0")
+        ttk.Entry(frow, textvariable=self.fade_in_var, width=4).grid(
+            row=0, column=1, padx=(2, 8))
+        ttk.Label(frow, text="out").grid(row=0, column=2)
+        self.fade_out_var = tk.StringVar(value="0")
+        ttk.Entry(frow, textvariable=self.fade_out_var, width=4).grid(
+            row=0, column=3, padx=(2, 2))
+        ttk.Label(frow, text="sec").grid(row=0, column=4)
+
+        ttk.Label(box, text="Aspect fill").grid(row=3, column=0, sticky="w",
+                                                pady=(6, 0))
+        self.fill_var = tk.StringVar(value=FILL_MODES[0][0])
+        fc = ttk.Combobox(box, textvariable=self.fill_var, state="readonly",
+                          width=18, values=[f[0] for f in FILL_MODES])
+        fc.grid(row=3, column=1, sticky="w", pady=(6, 0))
+        fc.bind("<<ComboboxSelected>>", lambda _e: hint())
+
+        ttk.Label(box, text="Effect").grid(row=4, column=0, sticky="w",
+                                           pady=(6, 0))
+        self.effect_var = tk.StringVar(value="None")
+        ec = ttk.Combobox(box, textvariable=self.effect_var, state="readonly",
+                          width=10, values=["None", "Reverse", "Boomerang"])
+        ec.grid(row=4, column=1, sticky="w", pady=(6, 0))
+        ec.bind("<<ComboboxSelected>>", lambda _e: hint())
+
+        ttk.Label(box, text="Loop ×").grid(row=5, column=0, sticky="w",
+                                           pady=(6, 0))
+        self.loop_var = tk.IntVar(value=1)
+        ttk.Spinbox(box, from_=1, to=10, width=4, textvariable=self.loop_var,
+                    command=hint).grid(row=5, column=1, sticky="w", pady=(6, 0))
+
+    def _rotate(self, delta):
+        self.rotate_val = (self.rotate_val + delta) % 360
+        self.rotate_label.config(text=f"{self.rotate_val}°")
+        self._update_export_hint()
 
     def _on_crf(self, _v):
         self.crf_label.config(text=str(self.crf_var.get()))
@@ -1215,17 +1460,40 @@ class App(BaseTk):
     # ------------------------------------------------------------- exporting
     def _settings(self, out):
         """Snapshot the current UI state into an ExportSettings."""
+        speed = dict(SPEEDS)[self.speed_var.get()]
+        aspect = dict(ASPECTS)[self.aspect_var.get()]
+        fill = dict(FILL_MODES)[self.fill_var.get()]
+        if fill == "blur_pad" and aspect:
+            crop, fill_mode, target_aspect = None, "blur_pad", aspect
+        else:
+            crop = tuple(self.crop) if self.crop else None
+            fill_mode, target_aspect = "crop", None
+        effect = self.effect_var.get()
         return ExportSettings(
             input_path=self.input_path, output_path=out,
             src_w=self.src_w, src_h=self.src_h,
             start=self.start_t, end=self.end_t,
-            crop=tuple(self.crop) if self.crop else None,
+            crop=crop,
             scale_cap=dict(SCALE_OPTIONS)[self.scale_var.get()],
             crf=self.crf_var.get(), fmt=dict(FORMATS)[self.fmt_var.get()],
             fast_trim=self.fast_trim_var.get(), hw=self.hw_var.get(),
             gif_fps=self.gif_fps_var.get(), target_size_mb=self._target_mb(),
             mute=self.mute_var.get(), volume=self.volume_var.get() / 100.0,
-            audio_only=self.audio_only_var.get())
+            audio_only=self.audio_only_var.get(),
+            rotate=self.rotate_val, flip_h=self.flip_h_var.get(),
+            flip_v=self.flip_v_var.get(), speed=speed,
+            fade_in=self._fade_secs(self.fade_in_var),
+            fade_out=self._fade_secs(self.fade_out_var),
+            fill_mode=fill_mode, target_aspect=target_aspect,
+            reverse=(effect == "Reverse"), boomerang=(effect == "Boomerang"),
+            loop=self.loop_var.get())
+
+    @staticmethod
+    def _fade_secs(var):
+        try:
+            return max(0.0, float(var.get() or 0))
+        except ValueError:
+            return 0.0
 
     def export(self):
         if not self.input_path:

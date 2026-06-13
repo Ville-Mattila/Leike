@@ -120,3 +120,60 @@ def test_audio_only_mp3(leike):
     assert len(cmds) == 1
     j = " ".join(cmds[0])
     assert "-vn" in j and "libmp3lame" in j
+
+
+def test_rotate_and_flip(leike):
+    j = " ".join(leike["build_commands"](
+        make(leike, crop=(0, 0, 1280, 720), rotate=90, flip_h=True))[0])
+    assert "transpose=1" in j and "hflip" in j
+
+
+def test_speed_video_and_audio(leike):
+    j = " ".join(leike["build_commands"](
+        make(leike, crop=(0, 0, 1280, 720), speed=2.0))[0])
+    assert "setpts=0.5000*PTS" in j and "atempo=2.0000" in j
+
+
+def test_speed_slow_needs_two_atempo(leike):
+    j = " ".join(leike["build_commands"](
+        make(leike, crop=(0, 0, 1280, 720), speed=0.25))[0])
+    assert "setpts=4.0000*PTS" in j and j.count("atempo=0.5") == 2
+
+
+def test_fade_in_out(leike):
+    j = " ".join(leike["build_commands"](
+        make(leike, crop=(0, 0, 1280, 720), fade_in=0.5, fade_out=1.0))[0])
+    assert "fade=t=in:st=0:d=0.50" in j
+    assert "fade=t=out:st=2.00:d=1.00" in j   # dur 3.0 -> out starts at 2.0
+
+
+def test_reverse_is_linear(leike):
+    cmds = leike["build_commands"](make(leike, crop=(0, 0, 1280, 720), reverse=True))
+    assert "-vf" in cmds[0]
+    j = " ".join(cmds[0])
+    assert "reverse" in j and "areverse" in j
+
+
+def test_blur_pad_uses_filter_complex(leike):
+    cmds = leike["build_commands"](make(leike, fill_mode="blur_pad",
+                                        target_aspect=9 / 16))
+    assert "-filter_complex" in cmds[0]
+    j = " ".join(cmds[0])
+    assert "gblur" in j and "overlay" in j and "-map" in j
+
+
+def test_boomerang_concat(leike):
+    j = " ".join(leike["build_commands"](
+        make(leike, crop=(0, 0, 1280, 720), boomerang=True))[0])
+    assert "concat=n=2" in j
+
+
+def test_loop_concat(leike):
+    j = " ".join(leike["build_commands"](
+        make(leike, crop=(0, 0, 1280, 720), loop=3))[0])
+    assert "split=3" in j and "concat=n=3" in j
+
+
+def test_transform_disables_passthrough(leike):
+    j = " ".join(leike["build_commands"](make(leike, rotate=90))[0])
+    assert "-c copy" not in j and "transpose=1" in j
