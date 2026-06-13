@@ -35,7 +35,7 @@ HANDLE = 7  # half-size of a corner grab handle, in canvas pixels
 # Aspect presets: label -> width/height ratio (None = free draw).
 ASPECTS = [
     ("Free", None),
-    ("9:16 (Vertical)", 9 / 16),
+    ("9:16 (Reels/TikTok)", 9 / 16),
     ("1:1 (Square)", 1.0),
     ("4:5 (Portrait)", 4 / 5),
     ("16:9 (Landscape)", 16 / 9),
