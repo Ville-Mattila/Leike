@@ -800,6 +800,21 @@ class App(BaseTk):
         # Progress bar: gold fill.
         style.configure("Horizontal.TProgressbar", background=GOLD,
                         troughcolor=PANEL_BG, bordercolor=BORDER)
+        # Notebook (tabs)
+        style.configure("TNotebook", background=BASE_BG, borderwidth=0)
+        style.configure("TNotebook.Tab", background=PANEL_BG, foreground=MUTED,
+                        padding=(10, 6), borderwidth=0)
+        style.map("TNotebook.Tab",
+                  background=[("selected", PANEL_HI)],
+                  foreground=[("selected", GOLD)])
+        # Primary (accent) button — gold fill, dark text
+        style.configure("Accent.TButton", background=GOLD, foreground=BASE_BG,
+                        bordercolor=GOLD_DEEP, relief="flat", padding=7)
+        style.map("Accent.TButton",
+                  background=[("active", GOLD_LIGHT), ("pressed", GOLD_DEEP)],
+                  foreground=[("disabled", MUTED)])
+        # Small uppercase section label
+        style.configure("Section.TLabel", foreground=MUTED, background=BASE_BG)
 
     def _apply_dark_titlebar(self):
         # Make the native Windows title bar dark (DWM immersive dark mode).
