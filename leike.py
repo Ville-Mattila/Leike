@@ -1055,7 +1055,7 @@ class App(BaseTk):
         ttk.Label(
             box, text="Drag on the preview to draw a crop box.\n"
                       "Drag inside to move, corners to resize.",
-            foreground="#666",
+            foreground=MUTED,
         ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(6, 0))
 
     def _build_export_panel(self, parent):
