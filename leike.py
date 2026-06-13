@@ -152,7 +152,8 @@ class App(BaseTk):
     def __init__(self):
         super().__init__()
         self.title("Leike")
-        self.resizable(False, False)
+        self.resizable(True, True)
+        self.minsize(900, 600)
         try:
             if os.path.exists(ICON_FILE):
                 self.iconbitmap(ICON_FILE)
@@ -167,6 +168,9 @@ class App(BaseTk):
         self.scale = 1.0      # display px per source px
         self.disp_w = 0
         self.disp_h = 0
+        self.off_x = 0        # canvas px offset of the letterboxed image
+        self.off_y = 0
+        self._resize_after = None
 
         # --- crop rect in SOURCE coordinates (or None = full frame) ---
         self.crop = None      # [x, y, w, h]
@@ -275,14 +279,57 @@ class App(BaseTk):
         except Exception:
             pass
 
+    # --------------------------------------------------------- display map
+    def _recompute_display(self):
+        """Fit the source frame into the current canvas, centred (letterboxed)."""
+        cw = max(self.canvas.winfo_width(), 1)
+        ch = max(self.canvas.winfo_height(), 1)
+        if not self.src_w or not self.src_h:
+            self.scale, self.disp_w, self.disp_h = 1.0, cw, ch
+            self.off_x = self.off_y = 0
+            return
+        self.scale = min(cw / self.src_w, ch / self.src_h)
+        self.disp_w = max(2, int(self.src_w * self.scale))
+        self.disp_h = max(2, int(self.src_h * self.scale))
+        self.off_x = (cw - self.disp_w) // 2
+        self.off_y = (ch - self.disp_h) // 2
+
+    def _s2c(self, x, y):
+        """Source pixel -> canvas pixel."""
+        return self.off_x + x * self.scale, self.off_y + y * self.scale
+
+    def _c2s(self, ex, ey):
+        """Canvas pixel -> source pixel (clamped to the frame)."""
+        x = min(max((ex - self.off_x) / self.scale, 0), self.src_w)
+        y = min(max((ey - self.off_y) / self.scale, 0), self.src_h)
+        return x, y
+
+    def _on_canvas_resize(self, _e):
+        self._recompute_display()
+        if not self.input_path:
+            self._draw_drop_hint()
+            return
+        self.redraw()  # instant re-letterbox of the cached frame
+        if self._resize_after:
+            self.after_cancel(self._resize_after)
+        self._resize_after = self.after(
+            150, lambda: self.request_preview(self.playhead))
+
     # ------------------------------------------------------------------ UI
     def _build_ui(self):
         root = ttk.Frame(self, padding=10)
-        root.grid(row=0, column=0)
+        root.grid(row=0, column=0, sticky="nsew")
+        self.rowconfigure(0, weight=1)
+        self.columnconfigure(0, weight=1)
+        root.columnconfigure(0, weight=1)   # preview column grows
+        root.columnconfigure(1, weight=0)   # controls column fixed
+        root.rowconfigure(0, weight=1)
 
         # Left: preview canvas
         left = ttk.Frame(root)
-        left.grid(row=0, column=0, sticky="n")
+        left.grid(row=0, column=0, sticky="nsew")
+        left.columnconfigure(0, weight=1)
+        left.rowconfigure(2, weight=1)      # canvas row grows
 
         ttk.Button(left, text="Open video...", command=self.open_file).grid(
             row=0, column=0, sticky="w", pady=(0, 6)
@@ -296,10 +343,11 @@ class App(BaseTk):
             bg=CANVAS_BG, highlightthickness=1,
             highlightbackground=CANVAS_BORDER,
         )
-        self.canvas.grid(row=2, column=0, pady=6)
+        self.canvas.grid(row=2, column=0, sticky="nsew", pady=6)
         self.canvas.bind("<ButtonPress-1>", self.on_canvas_down)
         self.canvas.bind("<B1-Motion>", self.on_canvas_drag)
         self.canvas.bind("<ButtonRelease-1>", self.on_canvas_up)
+        self.canvas.bind("<Configure>", self._on_canvas_resize)
         self._draw_drop_hint()
 
         # Accept files dropped from Explorer onto the window / canvas.
@@ -425,9 +473,10 @@ class App(BaseTk):
         msg = "Drop a video here\nor click “Open video…”"
         if not HAS_DND:
             msg = "Click “Open video…” to begin"
+        cw = max(self.canvas.winfo_width(), PREVIEW_MAX_W)
+        ch = max(self.canvas.winfo_height(), PREVIEW_MAX_H)
         self.canvas.create_text(
-            self.disp_w // 2 if self.disp_w else PREVIEW_MAX_W // 2,
-            self.disp_h // 2 if self.disp_h else PREVIEW_MAX_H // 2,
+            cw // 2, ch // 2,
             text=msg, fill=HINT_FG, font=("Segoe UI", 14), justify="center",
         )
 
@@ -468,12 +517,8 @@ class App(BaseTk):
             text=f"{os.path.basename(path)}   "
                  f"({self.src_w}x{self.src_h}, {fmt_time(self.duration)})")
 
-        # Fit the source into the preview box.
-        self.scale = min(PREVIEW_MAX_W / self.src_w,
-                         PREVIEW_MAX_H / self.src_h, 1.0)
-        self.disp_w = max(1, int(self.src_w * self.scale))
-        self.disp_h = max(1, int(self.src_h * self.scale))
-        self.canvas.config(width=self.disp_w, height=self.disp_h)
+        # Fit the source into the current canvas (recomputed on every resize).
+        self._recompute_display()
 
         # Reset edit state.
         self.crop = None
@@ -585,17 +630,20 @@ class App(BaseTk):
         c = self.canvas
         c.delete("all")
         if self._preview_img is not None:
-            c.create_image(0, 0, anchor="nw", image=self._preview_img)
+            c.create_image(self.off_x, self.off_y, anchor="nw",
+                           image=self._preview_img)
         if self.crop:
             x, y, w, h = self.crop
-            x0, y0 = x * self.scale, y * self.scale
-            x1, y1 = (x + w) * self.scale, (y + h) * self.scale
-            # Dim everything outside the crop box.
+            x0, y0 = self._s2c(x, y)
+            x1, y1 = self._s2c(x + w, y + h)
+            ix0, iy0 = self.off_x, self.off_y
+            ix1, iy1 = self.off_x + self.disp_w, self.off_y + self.disp_h
+            # Dim the image area outside the crop box.
             for rect in (
-                (0, 0, self.disp_w, y0),
-                (0, y1, self.disp_w, self.disp_h),
-                (0, y0, x0, y1),
-                (x1, y0, self.disp_w, y1),
+                (ix0, iy0, ix1, y0),
+                (ix0, y1, ix1, iy1),
+                (ix0, y0, x0, y1),
+                (x1, y0, ix1, y1),
             ):
                 c.create_rectangle(*rect, fill="#000000", stipple="gray50",
                                     outline="", width=0)
@@ -635,11 +683,11 @@ class App(BaseTk):
     def on_canvas_down(self, ev):
         if not self.input_path:
             return
-        sx, sy = ev.x / self.scale, ev.y / self.scale
+        sx, sy = self._c2s(ev.x, ev.y)
         if self.crop:
             x, y, w, h = self.crop
-            cx0, cy0 = x * self.scale, y * self.scale
-            cx1, cy1 = (x + w) * self.scale, (y + h) * self.scale
+            cx0, cy0 = self._s2c(x, y)
+            cx1, cy1 = self._s2c(x + w, y + h)
             handles = self._handle_points(cx0, cy0, cx1, cy1)
             names = ["nw", "ne", "sw", "se"]
             for (hx, hy), name in zip(handles, names):
@@ -655,8 +703,7 @@ class App(BaseTk):
     def on_canvas_drag(self, ev):
         if not self.drag:
             return
-        sx = min(max(ev.x / self.scale, 0), self.src_w)
-        sy = min(max(ev.y / self.scale, 0), self.src_h)
+        sx, sy = self._c2s(ev.x, ev.y)
         mode = self.drag["mode"]
 
         if mode == "draw":
