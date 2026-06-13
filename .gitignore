@@ -6,6 +6,7 @@ portable/
 installer/staging/
 __pycache__/
 *.pyc
+.pytest_cache/
 
 # Editor lock files (e.g. Affinity Designer)
 *~lock~
