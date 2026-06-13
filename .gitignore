@@ -2,6 +2,7 @@
 build/
 dist/
 portable/
+/VideoTrimCropResize/
 __pycache__/
 *.pyc
 

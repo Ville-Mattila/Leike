@@ -49,6 +49,11 @@ does not place the MIT code under the GPL. The two remain separately licensed.
   distributing the bundled bootloader as part of applications under any license.
 - https://github.com/pyinstaller/pyinstaller
 
+## sv-ttk  (bundled in every build, for the dark theme)
+
+- **License:** MIT License. © rdbende.
+- https://github.com/rdbende/Sun-Valley-ttk-theme
+
 ## CPython runtime  (embedded in the .exe)
 
 - **License:** Python Software Foundation License (permissive, GPL-compatible).

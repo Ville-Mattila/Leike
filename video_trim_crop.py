@@ -28,6 +28,22 @@ except Exception:
     BaseTk = tk.Tk
     HAS_DND = False
 
+# Native-looking dark theme (Sun Valley / Windows 11 Fluent). Optional: the
+# app falls back to a hand-rolled dark theme if the package is unavailable.
+try:
+    import sv_ttk
+    HAS_SVTTK = True
+except Exception:
+    sv_ttk = None
+    HAS_SVTTK = False
+
+# Dark palette for the tk Canvas and custom-drawn overlay (not ttk-themed).
+DARK_BG = "#1c1c1c"
+CANVAS_BG = "#0f0f0f"
+CANVAS_BORDER = "#3a3a3a"
+HINT_FG = "#9a9a9a"
+CROP_COLOR = "#4ec9ff"
+
 # Max size of the on-screen preview area (the source is scaled to fit).
 PREVIEW_MAX_W, PREVIEW_MAX_H = 760, 560
 HANDLE = 7  # half-size of a corner grab handle, in canvas pixels
@@ -150,7 +166,69 @@ class App(BaseTk):
 
         self.export_proc = None
 
+        self._apply_theme()
         self._build_ui()
+        self._apply_dark_titlebar()
+
+    # --------------------------------------------------------------- theming
+    def _apply_theme(self):
+        self.configure(bg=DARK_BG)
+        if HAS_SVTTK:
+            try:
+                sv_ttk.set_theme("dark")
+                return
+            except Exception:
+                pass
+        self._apply_fallback_dark()
+
+    def _apply_fallback_dark(self):
+        # Used only if sv_ttk is missing: recolour the 'clam' theme by hand.
+        style = ttk.Style(self)
+        try:
+            style.theme_use("clam")
+        except tk.TclError:
+            pass
+        fg, bg, field = "#e6e6e6", DARK_BG, "#2d2d2d"
+        style.configure(".", background=bg, foreground=fg,
+                        fieldbackground=field, bordercolor="#3a3a3a",
+                        lightcolor=bg, darkcolor=bg, insertcolor=fg)
+        style.map(".", foreground=[("disabled", "#777777")])
+        style.configure("TButton", background=field, padding=5)
+        style.map("TButton", background=[("active", "#3a3a3a")])
+        style.configure("TLabelframe", background=bg)
+        style.configure("TLabelframe.Label", background=bg, foreground=fg)
+        style.configure("TCombobox", fieldbackground=field, background=field)
+        style.configure("TEntry", fieldbackground=field, foreground=fg)
+        style.configure("Horizontal.TScale", background=bg)
+        style.configure("Horizontal.TProgressbar", background=CROP_COLOR,
+                        troughcolor=field)
+
+    def _apply_dark_titlebar(self):
+        # Make the native Windows title bar dark (DWM immersive dark mode).
+        if os.name != "nt":
+            return
+        try:
+            import ctypes
+            self.update_idletasks()
+            hwnd = (ctypes.windll.user32.GetParent(self.winfo_id())
+                    or self.winfo_id())
+            for attr in (20, 19):  # 20 = Win10 1903+/Win11, 19 = older builds
+                val = ctypes.c_int(1)
+                if ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                        hwnd, attr, ctypes.byref(val),
+                        ctypes.sizeof(val)) == 0:
+                    break
+            # Paint the title bar the same colour as the window background, so
+            # the caption and the content read as one surface (Win 11 22000+).
+            r, g, b = (int(DARK_BG[i:i + 2], 16) for i in (1, 3, 5))
+            caption = ctypes.c_int(r | (g << 8) | (b << 16))  # 0x00BBGGRR
+            ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                hwnd, 35, ctypes.byref(caption), ctypes.sizeof(caption))
+            # Force the title bar to repaint with the new colour.
+            self.withdraw()
+            self.deiconify()
+        except Exception:
+            pass
 
     # ------------------------------------------------------------------ UI
     def _build_ui(self):
@@ -170,7 +248,8 @@ class App(BaseTk):
 
         self.canvas = tk.Canvas(
             left, width=PREVIEW_MAX_W, height=PREVIEW_MAX_H,
-            bg="#1e1e1e", highlightthickness=1, highlightbackground="#555",
+            bg=CANVAS_BG, highlightthickness=1,
+            highlightbackground=CANVAS_BORDER,
         )
         self.canvas.grid(row=2, column=0, pady=6)
         self.canvas.bind("<ButtonPress-1>", self.on_canvas_down)
@@ -304,7 +383,7 @@ class App(BaseTk):
         self.canvas.create_text(
             self.disp_w // 2 if self.disp_w else PREVIEW_MAX_W // 2,
             self.disp_h // 2 if self.disp_h else PREVIEW_MAX_H // 2,
-            text=msg, fill="#888", font=("Segoe UI", 14), justify="center",
+            text=msg, fill=HINT_FG, font=("Segoe UI", 14), justify="center",
         )
 
     def on_drop(self, event):
@@ -475,11 +554,11 @@ class App(BaseTk):
             ):
                 c.create_rectangle(*rect, fill="#000000", stipple="gray50",
                                     outline="", width=0)
-            c.create_rectangle(x0, y0, x1, y1, outline="#4ec9ff", width=2)
+            c.create_rectangle(x0, y0, x1, y1, outline=CROP_COLOR, width=2)
             for hx, hy in self._handle_points(x0, y0, x1, y1):
                 c.create_rectangle(hx - HANDLE, hy - HANDLE,
                                     hx + HANDLE, hy + HANDLE,
-                                    fill="#4ec9ff", outline="white")
+                                    fill=CROP_COLOR, outline="white")
 
     def _handle_points(self, x0, y0, x1, y1):
         return [(x0, y0), (x1, y0), (x0, y1), (x1, y1)]  # nw ne sw se
