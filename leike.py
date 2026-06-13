@@ -61,6 +61,13 @@ ASPECTS = [
     ("16:9 (Landscape)", 16 / 9),
 ]
 
+# Output formats: label -> ExportSettings.fmt value.
+FORMATS = [
+    ("MP4 (H.264)", "mp4"),
+    ("GIF", "gif"),
+    ("WebM (VP9)", "webm"),
+]
+
 # Downscale options: label -> max length of the longest side (None = original).
 SCALE_OPTIONS = [
     ("Original", None),
@@ -165,9 +172,10 @@ class ExportSettings:
     crop: tuple | None = None       # (x, y, w, h) in source px
     scale_cap: int | None = None    # longest-side cap, or None for original
     crf: int = 20
-    fmt: str = "mp4"                # mp4 (gif/webm/mp3 arrive in later phases)
+    fmt: str = "mp4"                # mp4 | gif | webm (mp3 arrives in Phase 4)
     fast_trim: bool = True          # allow lossless -c copy for trim-only jobs
     hw: bool = False                # GPU encode (h264_nvenc) instead of libx264
+    gif_fps: int = 15               # frame rate for GIF output
 
 
 def _out_dims(s):
@@ -180,7 +188,8 @@ def _out_dims(s):
     return max(2, w), max(2, h)
 
 
-def _video_filters(s):
+def _geom_filters(s):
+    """crop + optional downscale (no pixel-format); shared by all formats."""
     chain = []
     if s.crop:
         x, y, w, h = s.crop
@@ -190,8 +199,25 @@ def _video_filters(s):
     ch = even(s.crop[3]) if s.crop else even(s.src_h)
     if (ow, oh) != (cw, ch):
         chain.append(f"scale={ow}:{oh}:flags=lanczos")
-    chain.append("format=yuv420p")
     return chain
+
+
+def _video_filters(s):
+    return _geom_filters(s) + ["format=yuv420p"]
+
+
+def _gif_passes(s):
+    """GIF via two passes: build an optimal palette, then render with it."""
+    pre = ",".join(_geom_filters(s) + [f"fps={s.gif_fps}"])
+    dur = max(0.001, s.end - s.start)
+    palette = os.path.join(tempfile.gettempdir(), f"leike_pal_{os.getpid()}.png")
+    p1 = [FFMPEG, "-y", "-ss", f"{s.start:.3f}", "-i", s.input_path,
+          "-t", f"{dur:.3f}", "-vf", pre + ",palettegen=stats_mode=diff", palette]
+    p2 = [FFMPEG, "-y", "-ss", f"{s.start:.3f}", "-i", s.input_path,
+          "-t", f"{dur:.3f}", "-i", palette,
+          "-lavfi", pre + " [x];[x][1:v] paletteuse=dither=bayer",
+          s.output_path]
+    return [p1, p2]
 
 
 def _is_passthrough(s):
@@ -224,16 +250,23 @@ def _venc(s):
 def build_commands(s):
     """Return a list of ffmpeg command arg-lists (one or more passes)."""
     dur = max(0.001, s.end - s.start)
+    common = ["-ss", f"{s.start:.3f}", "-i", s.input_path, "-t", f"{dur:.3f}"]
+
+    if s.fmt == "gif":
+        return _gif_passes(s)
+
+    if s.fmt == "webm":
+        return [[FFMPEG, "-y", *common, "-vf", ",".join(_video_filters(s)),
+                 "-c:v", "libvpx-vp9", "-crf", str(s.crf), "-b:v", "0",
+                 "-c:a", "libopus", "-b:a", "128k", s.output_path]]
+
+    # mp4
     if _is_passthrough(s):
-        return [[FFMPEG, "-y", "-ss", f"{s.start:.3f}", "-i", s.input_path,
-                 "-t", f"{dur:.3f}", "-c", "copy", "-movflags", "+faststart",
+        return [[FFMPEG, "-y", *common, "-c", "copy", "-movflags", "+faststart",
                  s.output_path]]
-    vf = ",".join(_video_filters(s))
-    cmd = [FFMPEG, "-y", "-ss", f"{s.start:.3f}", "-i", s.input_path,
-           "-t", f"{dur:.3f}", "-vf", vf, *_venc(s),
-           "-pix_fmt", "yuv420p", "-movflags", "+faststart",
-           "-c:a", "aac", "-b:a", "128k", s.output_path]
-    return [cmd]
+    return [[FFMPEG, "-y", *common, "-vf", ",".join(_video_filters(s)), *_venc(s),
+             "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+             "-c:a", "aac", "-b:a", "128k", s.output_path]]
 
 
 class App(BaseTk):
@@ -573,33 +606,54 @@ class App(BaseTk):
                              pady=(6, 0))
 
     def _build_export_panel(self, parent):
-        box = ttk.LabelFrame(parent, text="Export (H.264 .mp4)", padding=8)
+        box = ttk.LabelFrame(parent, text="Export", padding=8)
         box.grid(row=2, column=0, sticky="ew")
 
-        ttk.Label(box, text="Downscale").grid(row=0, column=0, sticky="w")
+        ttk.Label(box, text="Format").grid(row=0, column=0, sticky="w")
+        self.fmt_var = tk.StringVar(value=FORMATS[0][0])
+        fmt_cb = ttk.Combobox(
+            box, textvariable=self.fmt_var, state="readonly",
+            values=[f[0] for f in FORMATS], width=22,
+        )
+        fmt_cb.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 6))
+        fmt_cb.bind("<<ComboboxSelected>>", lambda _e: self._on_format_change())
+
+        ttk.Label(box, text="Downscale").grid(row=2, column=0, sticky="w")
         self.scale_var = tk.StringVar(value=SCALE_OPTIONS[0][0])
         scale_cb = ttk.Combobox(
             box, textvariable=self.scale_var, state="readonly",
             values=[s[0] for s in SCALE_OPTIONS], width=22,
         )
-        scale_cb.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(0, 6))
+        scale_cb.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(0, 6))
         scale_cb.bind("<<ComboboxSelected>>",
                       lambda _e: self._update_export_hint())
 
-        ttk.Label(box, text="Quality (CRF, lower = better)").grid(
-            row=2, column=0, columnspan=2, sticky="w")
+        # Quality (CRF) — used by MP4 and WebM.
+        self.quality_row = ttk.Frame(box)
+        self.quality_row.grid(row=4, column=0, columnspan=2, sticky="ew",
+                              pady=(0, 6))
+        ttk.Label(self.quality_row,
+                  text="Quality (CRF, lower = better)").grid(
+            row=0, column=0, columnspan=2, sticky="w")
         self.crf_var = tk.IntVar(value=20)
-        crf_row = ttk.Frame(box)
-        crf_row.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(0, 6))
-        ttk.Scale(crf_row, from_=14, to=30, variable=self.crf_var,
-                  command=self._on_crf, length=170).grid(row=0, column=0)
-        self.crf_label = ttk.Label(crf_row, text="20", width=3)
-        self.crf_label.grid(row=0, column=1, padx=(6, 0))
+        ttk.Scale(self.quality_row, from_=14, to=30, variable=self.crf_var,
+                  command=self._on_crf, length=170).grid(row=1, column=0)
+        self.crf_label = ttk.Label(self.quality_row, text="20", width=3)
+        self.crf_label.grid(row=1, column=1, padx=(6, 0))
+
+        # GIF frame rate — shown only when the format is GIF.
+        self.gif_row = ttk.Frame(box)
+        ttk.Label(self.gif_row, text="GIF frame rate").grid(
+            row=0, column=0, sticky="w")
+        self.gif_fps_var = tk.IntVar(value=15)
+        ttk.Spinbox(self.gif_row, from_=5, to=30, width=5,
+                    textvariable=self.gif_fps_var).grid(
+            row=0, column=1, padx=(6, 0))
 
         btns = ttk.Frame(box)
-        btns.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(4, 4))
+        btns.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(4, 4))
         btns.columnconfigure(0, weight=1)
-        self.export_btn = ttk.Button(btns, text="Export video...",
+        self.export_btn = ttk.Button(btns, text="Export...",
                                      command=self.export, state="disabled")
         self.export_btn.grid(row=0, column=0, sticky="ew")
         self.cancel_btn = ttk.Button(btns, text="Cancel",
@@ -607,11 +661,11 @@ class App(BaseTk):
         self.cancel_btn.grid(row=0, column=1, padx=(6, 0))
 
         self.export_hint = ttk.Label(box, text="", foreground=GOLD)
-        self.export_hint.grid(row=5, column=0, columnspan=2, sticky="w")
+        self.export_hint.grid(row=7, column=0, columnspan=2, sticky="w")
         self.progress = ttk.Progressbar(box, length=240, mode="determinate")
-        self.progress.grid(row=6, column=0, columnspan=2, sticky="ew")
+        self.progress.grid(row=8, column=0, columnspan=2, sticky="ew")
         self.status_label = ttk.Label(box, text="")
-        self.status_label.grid(row=7, column=0, columnspan=2, sticky="w",
+        self.status_label.grid(row=9, column=0, columnspan=2, sticky="w",
                                pady=(4, 0))
 
     def _build_encoding_panel(self, parent):
@@ -635,12 +689,28 @@ class App(BaseTk):
     def _on_crf(self, _v):
         self.crf_label.config(text=str(self.crf_var.get()))
 
+    def _on_format_change(self):
+        fmt = dict(FORMATS)[self.fmt_var.get()]
+        if fmt == "gif":
+            self.quality_row.grid_remove()
+            self.gif_row.grid(row=5, column=0, columnspan=2, sticky="w",
+                              pady=(0, 6))
+        else:
+            self.gif_row.grid_remove()
+            self.quality_row.grid(row=4, column=0, columnspan=2, sticky="ew",
+                                  pady=(0, 6))
+        self._update_export_hint()
+
     def _update_export_hint(self):
         if not self.input_path:
             self.export_hint.config(text="")
             return
         s = self._settings("")
-        if _is_passthrough(s):
+        if s.fmt == "gif":
+            self.export_hint.config(text=f"GIF · {s.gif_fps} fps (2-pass palette)")
+        elif s.fmt == "webm":
+            self.export_hint.config(text="WebM (VP9)")
+        elif _is_passthrough(s):
             self.export_hint.config(text="⚡ Lossless fast trim (no re-encode)")
         elif s.hw:
             self.export_hint.config(text="Re-encode: H.264 (GPU)")
@@ -1027,19 +1097,24 @@ class App(BaseTk):
             start=self.start_t, end=self.end_t,
             crop=tuple(self.crop) if self.crop else None,
             scale_cap=dict(SCALE_OPTIONS)[self.scale_var.get()],
-            crf=self.crf_var.get(), fmt="mp4",
-            fast_trim=self.fast_trim_var.get(), hw=self.hw_var.get())
+            crf=self.crf_var.get(), fmt=dict(FORMATS)[self.fmt_var.get()],
+            fast_trim=self.fast_trim_var.get(), hw=self.hw_var.get(),
+            gif_fps=self.gif_fps_var.get())
 
     def export(self):
         if not self.input_path:
             return
         self.commit_times()
+        fmt = dict(FORMATS)[self.fmt_var.get()]
+        ext = {"mp4": ".mp4", "gif": ".gif", "webm": ".webm"}[fmt]
+        ftypes = {"mp4": [("MP4 video", "*.mp4")], "gif": [("GIF", "*.gif")],
+                  "webm": [("WebM video", "*.webm")]}[fmt]
         base = os.path.splitext(os.path.basename(self.input_path))[0]
         out = filedialog.asksaveasfilename(
-            title="Export as", defaultextension=".mp4",
-            initialfile=f"{base}_export.mp4",
+            title="Export as", defaultextension=ext,
+            initialfile=f"{base}_export{ext}",
             initialdir=os.path.dirname(self.input_path),
-            filetypes=[("MP4 video", "*.mp4")],
+            filetypes=ftypes,
         )
         if not out:
             return

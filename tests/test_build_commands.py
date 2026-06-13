@@ -57,3 +57,25 @@ def test_sw_encoder_default(leike):
     cmds = leike["build_commands"](make(leike, crop=(0, 0, 1280, 720), hw=False))
     j = " ".join(cmds[0])
     assert "libx264" in j and "-crf 20" in j
+
+
+def test_gif_two_pass(leike):
+    cmds = leike["build_commands"](make(leike, fmt="gif", output_path="out.gif"))
+    assert len(cmds) == 2
+    assert "palettegen" in " ".join(cmds[0])
+    assert "paletteuse" in " ".join(cmds[1])
+    assert "fps=15" in " ".join(cmds[0])
+    assert "-c:a" not in " ".join(cmds[1])        # GIF has no audio
+
+
+def test_gif_fps_setting(leike):
+    cmds = leike["build_commands"](make(leike, fmt="gif", gif_fps=24))
+    assert "fps=24" in " ".join(cmds[0])
+
+
+def test_webm_vp9_opus(leike):
+    cmds = leike["build_commands"](make(leike, fmt="webm", output_path="out.webm"))
+    assert len(cmds) == 1
+    j = " ".join(cmds[0])
+    assert "libvpx-vp9" in j and "libopus" in j
+    assert "-c copy" not in j        # webm always re-encodes, even trim-only
