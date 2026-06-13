@@ -1,6 +1,7 @@
 # PyInstaller / Python build artifacts
 build/
 dist/
+portable/
 __pycache__/
 *.pyc
 

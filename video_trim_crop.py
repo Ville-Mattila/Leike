@@ -367,24 +367,52 @@ class App(BaseTk):
         self.request_preview(0.0)
 
     def probe(self, path):
-        r = run_capture([
-            FFPROBE, "-v", "error",
-            "-select_streams", "v:0",
-            "-show_entries", "stream=width,height",
-            "-show_entries", "format=duration",
-            "-of", "json", path,
-        ])
+        # Prefer ffprobe (precise JSON); fall back to parsing `ffmpeg -i` so a
+        # bundle can ship ffmpeg.exe alone, without the large ffprobe binary.
+        return self._probe_ffprobe(path) or self._probe_ffmpeg(path)
+
+    def _probe_ffprobe(self, path):
+        try:
+            r = run_capture([
+                FFPROBE, "-v", "error",
+                "-select_streams", "v:0",
+                "-show_entries", "stream=width,height",
+                "-show_entries", "format=duration",
+                "-of", "json", path,
+            ])
+        except OSError:
+            return None  # ffprobe not present
         if r.returncode != 0:
             return None
         try:
             data = json.loads(r.stdout)
             stream = data["streams"][0]
-            w = int(stream["width"])
-            h = int(stream["height"])
-            dur = float(data["format"]["duration"])
-            return w, h, dur
+            return (int(stream["width"]), int(stream["height"]),
+                    float(data["format"]["duration"]))
         except (KeyError, IndexError, ValueError):
             return None
+
+    def _probe_ffmpeg(self, path):
+        try:
+            r = run_capture([FFMPEG, "-hide_banner", "-i", path])
+        except OSError:
+            return None
+        text = r.stderr or ""
+        dur = None
+        m = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", text)
+        if m:
+            dur = (int(m.group(1)) * 3600 + int(m.group(2)) * 60
+                   + float(m.group(3)))
+        w = h = None
+        for line in text.splitlines():
+            if "Video:" in line:
+                d = re.search(r"\b(\d{2,5})x(\d{2,5})\b", line)
+                if d:
+                    w, h = int(d.group(1)), int(d.group(2))
+                    break
+        if w and h and dur is not None:
+            return w, h, dur
+        return None
 
     # ------------------------------------------------------- preview frames
     def on_scrub(self, _v):
