@@ -213,6 +213,11 @@ class ExportSettings:
     grayscale: bool = False         # desaturate to black & white
     denoise: bool = False           # hqdn3d denoise
     sharpen: bool = False           # unsharp mask
+    watermark_path: str | None = None    # image overlaid in a corner
+    watermark_pos: str = "br"       # tl | tr | bl | br
+    text: str = ""                  # caption text (drawtext)
+    text_pos: str = "bottom"        # top | bottom
+    subtitles_path: str | None = None    # SRT to burn in
 
 
 def _out_dims(s):
@@ -265,6 +270,43 @@ def _adjust_filters(s):
     return out
 
 
+def _ff_escape_path(p):
+    """Escape a Windows path for use inside an ffmpeg filter option value."""
+    return p.replace("\\", "/").replace(":", "\\:")
+
+
+def _drawtext_filter(s):
+    """Caption via drawtext; uses a temp textfile to avoid text escaping."""
+    txt = getattr(s, "text", "") or ""
+    if not txt.strip():
+        return []
+    tf = os.path.join(tempfile.gettempdir(), f"leike_text_{os.getpid()}.txt")
+    try:
+        with open(tf, "w", encoding="utf-8") as f:
+            f.write(txt)
+    except OSError:
+        return []
+    y = "h-th-40" if getattr(s, "text_pos", "bottom") == "bottom" else "40"
+    font = _ff_escape_path("C:/Windows/Fonts/arial.ttf")
+    return [f"drawtext=fontfile='{font}':textfile='{_ff_escape_path(tf)}':"
+            f"fontcolor=white:fontsize=36:borderw=3:bordercolor=black:"
+            f"x=(w-tw)/2:y={y}"]
+
+
+def _subtitles_filter(s):
+    p = getattr(s, "subtitles_path", None)
+    return [f"subtitles='{_ff_escape_path(p)}'"] if p else []
+
+
+def _inputs(s):
+    """ffmpeg input section, adding the watermark image as a 2nd input."""
+    dur = max(0.001, s.end - s.start)
+    base = ["-ss", f"{s.start:.3f}", "-i", s.input_path]
+    if getattr(s, "watermark_path", None) and s.fmt in ("mp4", "webm"):
+        base += ["-i", s.watermark_path]
+    return base + ["-t", f"{dur:.3f}"]
+
+
 def _speed_filter(s):
     sp = getattr(s, "speed", 1.0)
     return [f"setpts={1.0 / sp:.4f}*PTS"] if sp != 1.0 else []
@@ -310,6 +352,7 @@ def _linear_video(s, with_scale=True):
     chain += _fade_filters(s)
     if getattr(s, "reverse", False):
         chain.append("reverse")
+    chain += _drawtext_filter(s) + _subtitles_filter(s)
     return chain
 
 
@@ -323,11 +366,12 @@ def _blurpad_dims(s):
 
 
 def _is_complex(s):
-    """True when the video pipeline needs -filter_complex (splits/concat)."""
+    """True when the video pipeline needs -filter_complex (splits/overlay)."""
     return bool((getattr(s, "fill_mode", "crop") == "blur_pad"
                  and getattr(s, "target_aspect", None))
                 or getattr(s, "boomerang", False)
-                or (getattr(s, "loop", 0) or 0) > 1)
+                or (getattr(s, "loop", 0) or 0) > 1
+                or getattr(s, "watermark_path", None))
 
 
 def _video_graph(s, add_format=True):
@@ -367,6 +411,7 @@ def _video_graph(s, add_format=True):
     post = _fade_filters(s)
     if getattr(s, "reverse", False):
         post.append("reverse")
+    post += _drawtext_filter(s) + _subtitles_filter(s)
     if post:
         o = lab()
         segs.append(f"[{cur}]{','.join(post)}[{o}]")
@@ -383,6 +428,15 @@ def _video_graph(s, add_format=True):
         o = lab()
         segs.append(f"[{cur}]split={n}" + "".join(f"[{x}]" for x in ls) + ";"
                     + "".join(f"[{x}]" for x in ls) + f"concat=n={n}:v=1[{o}]")
+        cur = o
+
+    if getattr(s, "watermark_path", None):
+        pad = 12
+        pos = {"tl": f"{pad}:{pad}", "tr": f"W-w-{pad}:{pad}",
+               "bl": f"{pad}:H-h-{pad}", "br": f"W-w-{pad}:H-h-{pad}"}
+        o = lab()
+        segs.append(f"[{cur}][1:v]overlay="
+                    f"{pos.get(s.watermark_pos, pos['br'])}[{o}]")
         cur = o
 
     if add_format:
@@ -461,7 +515,10 @@ def _is_passthrough(s):
             and getattr(s, "saturation", 1.0) == 1.0
             and not getattr(s, "grayscale", False)
             and not getattr(s, "denoise", False)
-            and not getattr(s, "sharpen", False))
+            and not getattr(s, "sharpen", False)
+            and not getattr(s, "watermark_path", None)
+            and not (getattr(s, "text", "") or "").strip()
+            and not getattr(s, "subtitles_path", None))
 
 
 def _venc(s):
@@ -481,7 +538,7 @@ def _size_target_passes(s):
     log = s.output_path + ".2pass"
     null = "NUL" if os.name == "nt" else "/dev/null"
     flag, fval, vmap = _video_graph(s)
-    inp = ["-ss", f"{s.start:.3f}", "-i", s.input_path, "-t", f"{dur:.3f}"]
+    inp = _inputs(s)
     vbase = [flag, fval] + (["-map", vmap] if vmap else []) \
         + ["-c:v", "libx264", "-b:v", f"{vbit}k"]
     p1 = [FFMPEG, "-y", *inp, *vbase, "-pass", "1", "-passlogfile", log,
@@ -513,7 +570,7 @@ def build_commands(s):
         return _gif_passes(s)
 
     if s.fmt == "webm":
-        return [[FFMPEG, "-y", *common,
+        return [[FFMPEG, "-y", *_inputs(s),
                  *_av_reencode(s, ["-c:v", "libvpx-vp9", "-crf", str(s.crf),
                                    "-b:v", "0"], "libopus", "128k"),
                  s.output_path]]
@@ -524,7 +581,7 @@ def build_commands(s):
     if _is_passthrough(s):
         return [[FFMPEG, "-y", *common, "-c", "copy", "-movflags", "+faststart",
                  s.output_path]]
-    return [[FFMPEG, "-y", *common,
+    return [[FFMPEG, "-y", *_inputs(s),
              *_av_reencode(s, _venc(s), "aac", "128k",
                            extra_v=["-pix_fmt", "yuv420p"]),
              "-movflags", "+faststart", s.output_path]]
@@ -898,6 +955,7 @@ class App(BaseTk):
         self._build_audio_panel(self.advanced)
         self._build_transform_panel(self.advanced)
         self._build_adjust_panel(self.advanced)
+        self._build_overlay_panel(self.advanced)
 
     def _build_crop_panel(self, parent):
         box = ttk.LabelFrame(parent, text="Crop", padding=8)
@@ -1198,6 +1256,65 @@ class App(BaseTk):
         ttk.Checkbutton(box, text="Sharpen", variable=self.sharpen_var,
                         command=self._update_export_hint).grid(
             row=4, column=1, sticky="w")
+
+    def _build_overlay_panel(self, parent):
+        box = ttk.LabelFrame(parent, text="Overlay", padding=8)
+        box.grid(row=4, column=0, sticky="ew", pady=(0, 10))
+        self.watermark_path = None
+        self.subtitles_path = None
+
+        ttk.Label(box, text="Text").grid(row=0, column=0, sticky="w")
+        self.text_var = tk.StringVar(value="")
+        te = ttk.Entry(box, textvariable=self.text_var, width=18)
+        te.grid(row=0, column=1, columnspan=2, sticky="ew")
+        te.bind("<KeyRelease>", lambda _e: self._update_export_hint())
+        self.text_pos_var = tk.StringVar(value="bottom")
+        ttk.Combobox(box, textvariable=self.text_pos_var, state="readonly",
+                     width=8, values=["top", "bottom"]).grid(
+            row=1, column=1, sticky="w", pady=(0, 4))
+
+        ttk.Button(box, text="Watermark…",
+                   command=self._pick_watermark).grid(row=2, column=0, sticky="w")
+        self.wm_label = ttk.Label(box, text="none", foreground=MUTED, width=16)
+        self.wm_label.grid(row=2, column=1, sticky="w")
+        self.wm_pos_var = tk.StringVar(value="br")
+        ttk.Combobox(box, textvariable=self.wm_pos_var, state="readonly", width=5,
+                     values=["tl", "tr", "bl", "br"]).grid(row=2, column=2,
+                                                           sticky="w")
+
+        ttk.Button(box, text="Subtitles…",
+                   command=self._pick_subtitles).grid(row=3, column=0, sticky="w",
+                                                      pady=(4, 0))
+        self.sub_label = ttk.Label(box, text="none", foreground=MUTED, width=16)
+        self.sub_label.grid(row=3, column=1, sticky="w", pady=(4, 0))
+        ttk.Button(box, text="Clear", width=6,
+                   command=self._clear_overlays).grid(row=3, column=2, pady=(4, 0))
+
+    def _pick_watermark(self):
+        p = filedialog.askopenfilename(
+            title="Watermark image",
+            filetypes=[("Images", "*.png *.jpg *.jpeg *.bmp"), ("All", "*.*")])
+        if p:
+            self.watermark_path = p
+            self.wm_label.config(text=os.path.basename(p))
+            self._update_export_hint()
+
+    def _pick_subtitles(self):
+        p = filedialog.askopenfilename(
+            title="Subtitle file",
+            filetypes=[("Subtitles", "*.srt *.ass"), ("All", "*.*")])
+        if p:
+            self.subtitles_path = p
+            self.sub_label.config(text=os.path.basename(p))
+            self._update_export_hint()
+
+    def _clear_overlays(self):
+        self.watermark_path = None
+        self.wm_label.config(text="none")
+        self.subtitles_path = None
+        self.sub_label.config(text="none")
+        self.text_var.set("")
+        self._update_export_hint()
 
     def _on_crf(self, _v):
         self.crf_label.config(text=str(self.crf_var.get()))
@@ -1689,7 +1806,11 @@ class App(BaseTk):
             contrast=self.contrast_var.get() / 100.0,
             saturation=self.satur_var.get() / 100.0,
             grayscale=self.gray_var.get(), denoise=self.denoise_var.get(),
-            sharpen=self.sharpen_var.get())
+            sharpen=self.sharpen_var.get(),
+            watermark_path=self.watermark_path,
+            watermark_pos=self.wm_pos_var.get(),
+            text=self.text_var.get(), text_pos=self.text_pos_var.get(),
+            subtitles_path=self.subtitles_path)
 
     @staticmethod
     def _fade_secs(var):

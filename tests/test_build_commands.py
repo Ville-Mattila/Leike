@@ -196,3 +196,29 @@ def test_grayscale_denoise_sharpen(leike):
 def test_adjust_disables_passthrough(leike):
     j = " ".join(leike["build_commands"](make(leike, grayscale=True))[0])
     assert "-c copy" not in j and "hue=s=0" in j
+
+
+def test_text_drawtext(leike):
+    j = " ".join(leike["build_commands"](
+        make(leike, crop=(0, 0, 1280, 720), text="Hello"))[0])
+    assert "drawtext" in j and "textfile" in j
+
+
+def test_subtitles_filter(leike):
+    j = " ".join(leike["build_commands"](
+        make(leike, crop=(0, 0, 1280, 720), subtitles_path="C:/x/sub.srt"))[0])
+    assert "subtitles=" in j
+
+
+def test_watermark_overlay(leike):
+    cmds = leike["build_commands"](
+        make(leike, crop=(0, 0, 1280, 720),
+             watermark_path="C:/x/logo.png", watermark_pos="br"))
+    assert "-filter_complex" in cmds[0]
+    assert cmds[0].count("-i") == 2          # main input + watermark
+    assert "overlay=" in " ".join(cmds[0])
+
+
+def test_overlay_disables_passthrough(leike):
+    j = " ".join(leike["build_commands"](make(leike, text="Hi"))[0])
+    assert "-c copy" not in j
