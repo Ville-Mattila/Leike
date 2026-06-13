@@ -207,6 +207,12 @@ class ExportSettings:
     reverse: bool = False           # play backwards
     boomerang: bool = False         # forward then backward
     loop: int = 0                   # repeat the clip N times (0/1 = once)
+    brightness: float = 0.0         # eq brightness (-1..1, 0 = unchanged)
+    contrast: float = 1.0           # eq contrast (1.0 = unchanged)
+    saturation: float = 1.0         # eq saturation (1.0 = unchanged)
+    grayscale: bool = False         # desaturate to black & white
+    denoise: bool = False           # hqdn3d denoise
+    sharpen: bool = False           # unsharp mask
 
 
 def _out_dims(s):
@@ -239,6 +245,23 @@ def _orient_filters(s):
         out.append("hflip")
     if getattr(s, "flip_v", False):
         out.append("vflip")
+    return out
+
+
+def _adjust_filters(s):
+    """Colour / denoise / sharpen filters (all linear)."""
+    out = []
+    b = getattr(s, "brightness", 0.0)
+    c = getattr(s, "contrast", 1.0)
+    sat = getattr(s, "saturation", 1.0)
+    if b != 0.0 or c != 1.0 or sat != 1.0:
+        out.append(f"eq=brightness={b:.3f}:contrast={c:.3f}:saturation={sat:.3f}")
+    if getattr(s, "grayscale", False):
+        out.append("hue=s=0")
+    if getattr(s, "denoise", False):
+        out.append("hqdn3d")
+    if getattr(s, "sharpen", False):
+        out.append("unsharp")
     return out
 
 
@@ -279,8 +302,9 @@ def _atempo_chain(speed):
 
 
 def _linear_video(s, with_scale=True):
-    """Linear video filters: crop, orient, speed, scale, fade, reverse."""
-    chain = _crop_filter(s) + _orient_filters(s) + _speed_filter(s)
+    """Linear video filters: crop, orient, adjust, speed, scale, fade, reverse."""
+    chain = (_crop_filter(s) + _orient_filters(s) + _adjust_filters(s)
+             + _speed_filter(s))
     if with_scale:
         chain += _scale_filter(s)
     chain += _fade_filters(s)
@@ -322,7 +346,8 @@ def _video_graph(s, add_format=True):
         return f"v{idx[0]}"
 
     cur = "0:v"
-    pre = _crop_filter(s) + _orient_filters(s) + _speed_filter(s)
+    pre = (_crop_filter(s) + _orient_filters(s) + _adjust_filters(s)
+           + _speed_filter(s))
     if getattr(s, "fill_mode", "crop") == "blur_pad" and s.target_aspect:
         w, h = _blurpad_dims(s)
         prestr = (",".join(pre) + ",") if pre else ""
@@ -430,7 +455,13 @@ def _is_passthrough(s):
             and getattr(s, "loop", 0) == 0
             and not getattr(s, "mute", False)
             and getattr(s, "volume", 1.0) == 1.0
-            and not getattr(s, "audio_only", False))
+            and not getattr(s, "audio_only", False)
+            and getattr(s, "brightness", 0.0) == 0.0
+            and getattr(s, "contrast", 1.0) == 1.0
+            and getattr(s, "saturation", 1.0) == 1.0
+            and not getattr(s, "grayscale", False)
+            and not getattr(s, "denoise", False)
+            and not getattr(s, "sharpen", False))
 
 
 def _venc(s):
@@ -866,6 +897,7 @@ class App(BaseTk):
         self._build_encoding_panel(self.advanced)
         self._build_audio_panel(self.advanced)
         self._build_transform_panel(self.advanced)
+        self._build_adjust_panel(self.advanced)
 
     def _build_crop_panel(self, parent):
         box = ttk.LabelFrame(parent, text="Crop", padding=8)
@@ -1133,6 +1165,39 @@ class App(BaseTk):
         self.rotate_val = (self.rotate_val + delta) % 360
         self.rotate_label.config(text=f"{self.rotate_val}°")
         self._update_export_hint()
+
+    def _build_adjust_panel(self, parent):
+        box = ttk.LabelFrame(parent, text="Adjust", padding=8)
+        box.grid(row=3, column=0, sticky="ew", pady=(0, 10))
+
+        def slider(row, label, var, frm, to, suffix):
+            ttk.Label(box, text=label).grid(row=row, column=0, sticky="w")
+            lbl = ttk.Label(box, text=f"{var.get()}{suffix}", width=5)
+            ttk.Scale(box, from_=frm, to=to, variable=var, length=130,
+                      command=lambda _v: lbl.config(
+                          text=f"{var.get()}{suffix}")).grid(row=row, column=1,
+                                                             sticky="w")
+            lbl.grid(row=row, column=2, padx=(4, 0))
+
+        self.bright_var = tk.IntVar(value=0)
+        slider(0, "Brightness", self.bright_var, -100, 100, "")
+        self.contrast_var = tk.IntVar(value=100)
+        slider(1, "Contrast", self.contrast_var, 0, 200, "%")
+        self.satur_var = tk.IntVar(value=100)
+        slider(2, "Saturation", self.satur_var, 0, 200, "%")
+
+        self.gray_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(box, text="Grayscale", variable=self.gray_var,
+                        command=self._update_export_hint).grid(
+            row=3, column=0, columnspan=2, sticky="w", pady=(4, 0))
+        self.denoise_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(box, text="Denoise", variable=self.denoise_var,
+                        command=self._update_export_hint).grid(
+            row=4, column=0, sticky="w")
+        self.sharpen_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(box, text="Sharpen", variable=self.sharpen_var,
+                        command=self._update_export_hint).grid(
+            row=4, column=1, sticky="w")
 
     def _on_crf(self, _v):
         self.crf_label.config(text=str(self.crf_var.get()))
@@ -1619,7 +1684,12 @@ class App(BaseTk):
             fade_out=self._fade_secs(self.fade_out_var),
             fill_mode=fill_mode, target_aspect=target_aspect,
             reverse=(effect == "Reverse"), boomerang=(effect == "Boomerang"),
-            loop=self.loop_var.get())
+            loop=self.loop_var.get(),
+            brightness=self.bright_var.get() / 100.0,
+            contrast=self.contrast_var.get() / 100.0,
+            saturation=self.satur_var.get() / 100.0,
+            grayscale=self.gray_var.get(), denoise=self.denoise_var.get(),
+            sharpen=self.sharpen_var.get())
 
     @staticmethod
     def _fade_secs(var):

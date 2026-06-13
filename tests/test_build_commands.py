@@ -177,3 +177,22 @@ def test_loop_concat(leike):
 def test_transform_disables_passthrough(leike):
     j = " ".join(leike["build_commands"](make(leike, rotate=90))[0])
     assert "-c copy" not in j and "transpose=1" in j
+
+
+def test_color_eq(leike):
+    j = " ".join(leike["build_commands"](
+        make(leike, crop=(0, 0, 1280, 720),
+             brightness=0.1, contrast=1.2, saturation=1.5))[0])
+    assert "eq=brightness=0.100:contrast=1.200:saturation=1.500" in j
+
+
+def test_grayscale_denoise_sharpen(leike):
+    j = " ".join(leike["build_commands"](
+        make(leike, crop=(0, 0, 1280, 720),
+             grayscale=True, denoise=True, sharpen=True))[0])
+    assert "hue=s=0" in j and "hqdn3d" in j and "unsharp" in j
+
+
+def test_adjust_disables_passthrough(leike):
+    j = " ".join(leike["build_commands"](make(leike, grayscale=True))[0])
+    assert "-c copy" not in j and "hue=s=0" in j
