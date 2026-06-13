@@ -1,5 +1,7 @@
 # VIDEOTRIMMERCROPPERRESIZER
 
+A fully standalone version and a version for previous FFMPEG owners
+
 A small Windows app for ffmpeg. **Drag in a video, crop it, trim its
 length, and export it as a widely compatible H.264 `.mp4`.**
 
