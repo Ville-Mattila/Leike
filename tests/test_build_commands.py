@@ -222,3 +222,11 @@ def test_watermark_overlay(leike):
 def test_overlay_disables_passthrough(leike):
     j = " ".join(leike["build_commands"](make(leike, text="Hi"))[0])
     assert "-c copy" not in j
+
+
+def test_stabilize_two_pass(leike):
+    cmds = leike["build_commands"](make(leike, crop=(0, 0, 1280, 720),
+                                        stabilize=True))
+    assert len(cmds) == 2
+    assert "vidstabdetect" in " ".join(cmds[0])
+    assert "vidstabtransform" in " ".join(cmds[1])

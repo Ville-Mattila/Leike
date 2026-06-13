@@ -218,6 +218,7 @@ class ExportSettings:
     text: str = ""                  # caption text (drawtext)
     text_pos: str = "bottom"        # top | bottom
     subtitles_path: str | None = None    # SRT to burn in
+    stabilize: bool = False         # two-pass vidstab deshake
 
 
 def _out_dims(s):
@@ -518,7 +519,8 @@ def _is_passthrough(s):
             and not getattr(s, "sharpen", False)
             and not getattr(s, "watermark_path", None)
             and not (getattr(s, "text", "") or "").strip()
-            and not getattr(s, "subtitles_path", None))
+            and not getattr(s, "subtitles_path", None)
+            and not getattr(s, "stabilize", False))
 
 
 def _venc(s):
@@ -555,6 +557,30 @@ def _size_target_passes(s):
     return [p1, p2]
 
 
+def _stabilize_passes(s):
+    """Two-pass vidstab: detect camera shake, then compensate."""
+    trf = _ff_escape_path(s.output_path + ".trf")
+    dur = max(0.001, s.end - s.start)
+    inp = ["-ss", f"{s.start:.3f}", "-i", s.input_path, "-t", f"{dur:.3f}"]
+    null = "NUL" if os.name == "nt" else "/dev/null"
+    p1 = [FFMPEG, "-y", *inp,
+          "-vf", f"vidstabdetect=shakiness=6:accuracy=12:result='{trf}'",
+          "-f", "null", null]
+    chain = ([f"vidstabtransform=input='{trf}':smoothing=14"]
+             + _linear_video(s) + ["format=yuv420p"])
+    p2 = [FFMPEG, "-y", *inp, "-vf", ",".join(chain), *_venc(s),
+          "-pix_fmt", "yuv420p"]
+    if s.mute:
+        p2 += ["-an"]
+    else:
+        af = _af_chain(s)
+        if af:
+            p2 += ["-af", ",".join(af)]
+        p2 += ["-c:a", "aac", "-b:a", "128k"]
+    p2 += ["-movflags", "+faststart", s.output_path]
+    return [p1, p2]
+
+
 def build_commands(s):
     """Return a list of ffmpeg command arg-lists (one or more passes)."""
     dur = max(0.001, s.end - s.start)
@@ -576,6 +602,8 @@ def build_commands(s):
                  s.output_path]]
 
     # mp4
+    if getattr(s, "stabilize", False):
+        return _stabilize_passes(s)
     if s.target_size_mb:
         return _size_target_passes(s)
     if _is_passthrough(s):
@@ -1256,6 +1284,11 @@ class App(BaseTk):
         ttk.Checkbutton(box, text="Sharpen", variable=self.sharpen_var,
                         command=self._update_export_hint).grid(
             row=4, column=1, sticky="w")
+        self.stabilize_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(box, text="Stabilize (deshake · 2-pass · MP4)",
+                        variable=self.stabilize_var,
+                        command=self._update_export_hint).grid(
+            row=5, column=0, columnspan=3, sticky="w", pady=(4, 0))
 
     def _build_overlay_panel(self, parent):
         box = ttk.LabelFrame(parent, text="Overlay", padding=8)
@@ -1810,7 +1843,8 @@ class App(BaseTk):
             watermark_path=self.watermark_path,
             watermark_pos=self.wm_pos_var.get(),
             text=self.text_var.get(), text_pos=self.text_pos_var.get(),
-            subtitles_path=self.subtitles_path)
+            subtitles_path=self.subtitles_path,
+            stabilize=self.stabilize_var.get())
 
     @staticmethod
     def _fade_secs(var):
@@ -1920,9 +1954,9 @@ class App(BaseTk):
         self.export_btn.config(state="normal")
         if getattr(self, "cancel_btn", None):
             self.cancel_btn.config(state="disabled")
-        # Remove any two-pass log files left by a size-targeted export.
+        # Remove any two-pass log / stabilization files.
         if out:
-            for f in glob.glob(out + ".2pass*"):
+            for f in glob.glob(out + ".2pass*") + glob.glob(out + ".trf"):
                 try:
                     os.remove(f)
                 except OSError:
