@@ -28,21 +28,24 @@ except Exception:
     BaseTk = tk.Tk
     HAS_DND = False
 
-# Native-looking dark theme (Sun Valley / Windows 11 Fluent). Optional: the
-# app falls back to a hand-rolled dark theme if the package is unavailable.
-try:
-    import sv_ttk
-    HAS_SVTTK = True
-except Exception:
-    sv_ttk = None
-    HAS_SVTTK = False
+# Brand palette, extracted from the Leike logo (leike.svg): warm near-black
+# and marigold gold.
+GOLD       = "#FFC551"   # accent
+GOLD_LIGHT = "#FFD580"   # hover / highlight
+GOLD_DEEP  = "#D99A2E"   # pressed / active
+BASE_BG    = "#1B1508"   # window background (warm near-black)
+PANEL_BG   = "#251D0C"   # raised panels, fields, buttons
+PANEL_HI   = "#33280F"   # button hover
+BORDER     = "#3A2E12"   # subtle borders
+TEXT       = "#F5EFE3"   # primary text (warm off-white)
+MUTED      = "#A89A82"   # secondary / hint text
+DISABLED   = "#6B5E45"
 
-# Dark palette for the tk Canvas and custom-drawn overlay (not ttk-themed).
-DARK_BG = "#1c1c1c"
-CANVAS_BG = "#0f0f0f"
-CANVAS_BORDER = "#3a3a3a"
-HINT_FG = "#9a9a9a"
-CROP_COLOR = "#4ec9ff"
+# Canvas + custom-drawn crop overlay (not ttk-themed).
+CANVAS_BG = "#120D04"
+CANVAS_BORDER = BORDER
+HINT_FG = MUTED
+CROP_COLOR = GOLD
 
 # Max size of the on-screen preview area (the source is scaled to fit).
 PREVIEW_MAX_W, PREVIEW_MAX_H = 760, 560
@@ -172,36 +175,59 @@ class App(BaseTk):
 
     # --------------------------------------------------------------- theming
     def _apply_theme(self):
-        self.configure(bg=DARK_BG)
-        if HAS_SVTTK:
-            try:
-                sv_ttk.set_theme("dark")
-                return
-            except Exception:
-                pass
-        self._apply_fallback_dark()
-
-    def _apply_fallback_dark(self):
-        # Used only if sv_ttk is missing: recolour the 'clam' theme by hand.
+        # Warm-dark + gold theme built on 'clam' (fully recolourable) to match
+        # the Leike logo. Replaces sv-ttk, whose accent can't be recoloured.
+        self.configure(bg=BASE_BG)
         style = ttk.Style(self)
         try:
             style.theme_use("clam")
         except tk.TclError:
             pass
-        fg, bg, field = "#e6e6e6", DARK_BG, "#2d2d2d"
-        style.configure(".", background=bg, foreground=fg,
-                        fieldbackground=field, bordercolor="#3a3a3a",
-                        lightcolor=bg, darkcolor=bg, insertcolor=fg)
-        style.map(".", foreground=[("disabled", "#777777")])
-        style.configure("TButton", background=field, padding=5)
-        style.map("TButton", background=[("active", "#3a3a3a")])
-        style.configure("TLabelframe", background=bg)
-        style.configure("TLabelframe.Label", background=bg, foreground=fg)
-        style.configure("TCombobox", fieldbackground=field, background=field)
-        style.configure("TEntry", fieldbackground=field, foreground=fg)
-        style.configure("Horizontal.TScale", background=bg)
-        style.configure("Horizontal.TProgressbar", background=CROP_COLOR,
-                        troughcolor=field)
+
+        style.configure(".", background=BASE_BG, foreground=TEXT,
+                        fieldbackground=PANEL_BG, bordercolor=BORDER,
+                        lightcolor=BASE_BG, darkcolor=BASE_BG,
+                        insertcolor=TEXT, focuscolor=GOLD)
+        style.map(".", foreground=[("disabled", DISABLED)])
+
+        style.configure("TFrame", background=BASE_BG)
+        style.configure("TLabel", background=BASE_BG, foreground=TEXT)
+
+        style.configure("TLabelframe", background=BASE_BG,
+                        bordercolor=BORDER, borderwidth=1)
+        style.configure("TLabelframe.Label", background=BASE_BG,
+                        foreground=GOLD)
+
+        style.configure("TButton", background=PANEL_BG, foreground=TEXT,
+                        bordercolor=BORDER, relief="flat", padding=6)
+        style.map("TButton",
+                  background=[("disabled", BASE_BG), ("pressed", GOLD_DEEP),
+                              ("active", PANEL_HI)],
+                  foreground=[("pressed", BASE_BG)],
+                  bordercolor=[("focus", GOLD)])
+
+        style.configure("TEntry", fieldbackground=PANEL_BG, foreground=TEXT,
+                        bordercolor=BORDER, insertcolor=TEXT)
+        style.map("TEntry", bordercolor=[("focus", GOLD)])
+
+        style.configure("TCombobox", fieldbackground=PANEL_BG, foreground=TEXT,
+                        background=PANEL_BG, bordercolor=BORDER,
+                        arrowcolor=GOLD)
+        style.map("TCombobox", fieldbackground=[("readonly", PANEL_BG)],
+                  bordercolor=[("focus", GOLD)],
+                  arrowcolor=[("active", GOLD_LIGHT)])
+        # Combobox drop-down list (a classic tk Listbox).
+        self.option_add("*TCombobox*Listbox.background", PANEL_BG)
+        self.option_add("*TCombobox*Listbox.foreground", TEXT)
+        self.option_add("*TCombobox*Listbox.selectBackground", GOLD)
+        self.option_add("*TCombobox*Listbox.selectForeground", BASE_BG)
+
+        # Slider: gold grip on a dark groove.
+        style.configure("Horizontal.TScale", background=GOLD,
+                        troughcolor=PANEL_BG, bordercolor=BORDER)
+        # Progress bar: gold fill.
+        style.configure("Horizontal.TProgressbar", background=GOLD,
+                        troughcolor=PANEL_BG, bordercolor=BORDER)
 
     def _apply_dark_titlebar(self):
         # Make the native Windows title bar dark (DWM immersive dark mode).
@@ -220,7 +246,7 @@ class App(BaseTk):
                     break
             # Paint the title bar the same colour as the window background, so
             # the caption and the content read as one surface (Win 11 22000+).
-            r, g, b = (int(DARK_BG[i:i + 2], 16) for i in (1, 3, 5))
+            r, g, b = (int(BASE_BG[i:i + 2], 16) for i in (1, 3, 5))
             caption = ctypes.c_int(r | (g << 8) | (b << 16))  # 0x00BBGGRR
             ctypes.windll.dwmapi.DwmSetWindowAttribute(
                 hwnd, 35, ctypes.byref(caption), ctypes.sizeof(caption))

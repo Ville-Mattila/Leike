@@ -43,13 +43,12 @@ Source is a single file: `leike.py` (Python 3 + tkinter).
 
 - Run from source: `python leike.py` (or `Run.bat`)
 - Rebuild the exe: `Build-exe.bat`
-  (needs `pip install tkinterdnd2 sv-ttk pyinstaller`)
+  (needs `pip install tkinterdnd2 pyinstaller`)
 
-The app uses a native-looking dark theme on Windows — **sv-ttk** (Sun Valley /
-Windows 11 Fluent) for the widgets, plus DWM calls for a dark title bar whose
-caption colour matches the window. Drag-and-drop is provided by **tkinterdnd2**.
-Both are optional: without them the app still runs (button-only, with a
-hand-rolled dark fallback theme).
+The app uses a custom **warm-dark + gold** theme drawn from the Leike logo
+(`leike.svg`), plus DWM calls for a dark title bar whose caption colour
+matches the window. Drag-and-drop is provided by **tkinterdnd2** (optional —
+without it the app still runs via the *Open video…* button).
 
 ## License
 
