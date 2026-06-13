@@ -247,6 +247,7 @@ class App(BaseTk):
         )
 
         self.export_proc = None
+        self._cancelled = False
 
         self._apply_theme()
         self._build_ui()
@@ -551,10 +552,15 @@ class App(BaseTk):
         self.crf_label = ttk.Label(crf_row, text="20", width=3)
         self.crf_label.grid(row=0, column=1, padx=(6, 0))
 
-        self.export_btn = ttk.Button(box, text="Export video...",
+        btns = ttk.Frame(box)
+        btns.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(4, 4))
+        btns.columnconfigure(0, weight=1)
+        self.export_btn = ttk.Button(btns, text="Export video...",
                                      command=self.export, state="disabled")
-        self.export_btn.grid(row=4, column=0, columnspan=2, sticky="ew",
-                             pady=(4, 4))
+        self.export_btn.grid(row=0, column=0, sticky="ew")
+        self.cancel_btn = ttk.Button(btns, text="Cancel",
+                                     command=self.cancel_export, state="disabled")
+        self.cancel_btn.grid(row=0, column=1, padx=(6, 0))
 
         self.progress = ttk.Progressbar(box, length=240, mode="determinate")
         self.progress.grid(row=5, column=0, columnspan=2, sticky="ew")
@@ -564,6 +570,13 @@ class App(BaseTk):
 
     def _on_crf(self, _v):
         self.crf_label.config(text=str(self.crf_var.get()))
+
+    def cancel_export(self):
+        self._cancelled = True
+        if self.export_proc and self.export_proc.poll() is None:
+            self.export_proc.kill()
+        self.cancel_btn.config(state="disabled")
+        self.status_label.config(text="Cancelling…")
 
     # -------------------------------------------------------------- loading
     def _draw_drop_hint(self):
