@@ -16,6 +16,7 @@ import shutil
 import subprocess
 import threading
 import tempfile
+from dataclasses import dataclass
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 
@@ -146,6 +147,61 @@ def parse_time(text):
 def even(n):
     n = int(round(n))
     return n - (n % 2)
+
+
+# --------------------------------------------------------------------------
+# Export command builder: pure UI-state -> list of ffmpeg passes.
+# Each feature adds a field here and a hook in the helpers below; the GUI just
+# fills an ExportSettings and runs whatever passes come back.
+# --------------------------------------------------------------------------
+@dataclass
+class ExportSettings:
+    input_path: str
+    output_path: str
+    src_w: int
+    src_h: int
+    start: float
+    end: float
+    crop: tuple | None = None       # (x, y, w, h) in source px
+    scale_cap: int | None = None    # longest-side cap, or None for original
+    crf: int = 20
+    fmt: str = "mp4"                # mp4 (gif/webm/mp3 arrive in later phases)
+
+
+def _out_dims(s):
+    """Final output (w, h) after crop + optional downscale, even numbers."""
+    w, h = (s.crop[2], s.crop[3]) if s.crop else (s.src_w, s.src_h)
+    w, h = even(w), even(h)
+    if s.scale_cap and max(w, h) > s.scale_cap:
+        f = s.scale_cap / max(w, h)
+        w, h = even(w * f), even(h * f)
+    return max(2, w), max(2, h)
+
+
+def _video_filters(s):
+    chain = []
+    if s.crop:
+        x, y, w, h = s.crop
+        chain.append(f"crop={even(w)}:{even(h)}:{even(x)}:{even(y)}")
+    ow, oh = _out_dims(s)
+    cw = even(s.crop[2]) if s.crop else even(s.src_w)
+    ch = even(s.crop[3]) if s.crop else even(s.src_h)
+    if (ow, oh) != (cw, ch):
+        chain.append(f"scale={ow}:{oh}:flags=lanczos")
+    chain.append("format=yuv420p")
+    return chain
+
+
+def build_commands(s):
+    """Return a list of ffmpeg command arg-lists (one or more passes)."""
+    dur = max(0.001, s.end - s.start)
+    vf = ",".join(_video_filters(s))
+    cmd = [FFMPEG, "-y", "-ss", f"{s.start:.3f}", "-i", s.input_path,
+           "-t", f"{dur:.3f}", "-vf", vf,
+           "-c:v", "libx264", "-preset", "medium", "-crf", str(s.crf),
+           "-pix_fmt", "yuv420p", "-movflags", "+faststart",
+           "-c:a", "aac", "-b:a", "128k", s.output_path]
+    return [cmd]
 
 
 class App(BaseTk):
@@ -873,30 +929,15 @@ class App(BaseTk):
             text=f"Duration: {max(0.0, self.end_t - self.start_t):.3f} s")
 
     # ------------------------------------------------------------- exporting
-    def _output_dims(self):
-        """Final output (w, h) after crop + optional downscale, even numbers."""
-        if self.crop:
-            w, h = even(self.crop[2]), even(self.crop[3])
-        else:
-            w, h = even(self.src_w), even(self.src_h)
-        cap = dict(SCALE_OPTIONS)[self.scale_var.get()]
-        if cap and max(w, h) > cap:
-            factor = cap / max(w, h)
-            w, h = even(w * factor), even(h * factor)
-        return max(2, w), max(2, h)
-
-    def build_filters(self):
-        chain = []
-        if self.crop:
-            x, y, w, h = self.crop
-            chain.append(f"crop={even(w)}:{even(h)}:{even(x)}:{even(y)}")
-        ow, oh = self._output_dims()
-        cw = even(self.crop[2]) if self.crop else even(self.src_w)
-        ch = even(self.crop[3]) if self.crop else even(self.src_h)
-        if (ow, oh) != (cw, ch):
-            chain.append(f"scale={ow}:{oh}:flags=lanczos")
-        chain.append("format=yuv420p")
-        return ",".join(chain)
+    def _settings(self, out):
+        """Snapshot the current UI state into an ExportSettings."""
+        return ExportSettings(
+            input_path=self.input_path, output_path=out,
+            src_w=self.src_w, src_h=self.src_h,
+            start=self.start_t, end=self.end_t,
+            crop=tuple(self.crop) if self.crop else None,
+            scale_cap=dict(SCALE_OPTIONS)[self.scale_var.get()],
+            crf=self.crf_var.get(), fmt="mp4")
 
     def export(self):
         if not self.input_path:
@@ -916,53 +957,67 @@ class App(BaseTk):
             return
 
         dur = max(0.001, self.end_t - self.start_t)
-        cmd = [
-            FFMPEG, "-y",
-            "-ss", f"{self.start_t:.3f}",
-            "-i", self.input_path,
-            "-t", f"{dur:.3f}",
-            "-vf", self.build_filters(),
-            "-c:v", "libx264", "-preset", "medium",
-            "-crf", str(self.crf_var.get()),
-            "-pix_fmt", "yuv420p",
-            "-movflags", "+faststart",
-            "-c:a", "aac", "-b:a", "128k",
-            out,
-        ]
+        cmds = build_commands(self._settings(out))
         self.export_btn.config(state="disabled")
+        if getattr(self, "cancel_btn", None):
+            self.cancel_btn.config(state="normal")
         self.progress["value"] = 0
         self.status_label.config(text="Exporting...")
-        threading.Thread(target=self._run_export, args=(cmd, dur, out),
+        threading.Thread(target=self._run_export, args=(cmds, dur, out),
                          daemon=True).start()
 
-    def _run_export(self, cmd, dur, out):
+    def _run_export(self, cmds, dur, out):
+        """Run each pass in sequence; report combined progress; honour cancel."""
+        self._cancelled = False
         time_re = re.compile(r"time=(\d+):(\d+):(\d+\.\d+)")
-        try:
-            proc = subprocess.Popen(
-                cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                text=True, creationflags=NO_WINDOW)
-        except OSError as exc:
-            self.after(0, lambda: self._export_done(False, str(exc), out))
-            return
         last_err = ""
-        for line in proc.stderr:
-            m = time_re.search(line)
-            if m:
-                t = (int(m.group(1)) * 3600 + int(m.group(2)) * 60
-                     + float(m.group(3)))
-                pct = min(100.0, t / dur * 100.0)
-                self.after(0, lambda p=pct: self.progress.config(value=p))
-            elif line.strip():
-                last_err = line.strip()
-        code = proc.wait()
-        self.after(0, lambda: self._export_done(code == 0, last_err, out))
+        n = len(cmds)
+        for i, cmd in enumerate(cmds):
+            try:
+                proc = subprocess.Popen(
+                    cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                    text=True, creationflags=NO_WINDOW)
+            except OSError as exc:
+                return self.after(
+                    0, lambda e=str(exc): self._export_done(False, e, out))
+            self.export_proc = proc
+            for line in proc.stderr:
+                if self._cancelled:
+                    proc.kill()
+                    break
+                m = time_re.search(line)
+                if m:
+                    t = (int(m.group(1)) * 3600 + int(m.group(2)) * 60
+                         + float(m.group(3)))
+                    frac = (i + min(1.0, t / dur)) / n
+                    self.after(0, lambda p=frac * 100:
+                               self.progress.config(value=p))
+                elif line.strip():
+                    last_err = line.strip()
+            code = proc.wait()
+            if self._cancelled:
+                break
+            if code != 0:
+                return self.after(
+                    0, lambda e=last_err: self._export_done(False, e, out))
+        self.after(0, lambda: self._export_done(not self._cancelled, last_err, out))
 
     def _export_done(self, ok, err, out):
         self.export_btn.config(state="normal")
+        if getattr(self, "cancel_btn", None):
+            self.cancel_btn.config(state="disabled")
         if ok:
             self.progress["value"] = 100
             self.status_label.config(text="Done.")
             messagebox.showinfo("Export complete", f"Saved:\n{out}")
+        elif self._cancelled:
+            self.progress["value"] = 0
+            self.status_label.config(text="Cancelled.")
+            try:
+                if out and os.path.exists(out):
+                    os.remove(out)
+            except OSError:
+                pass
         else:
             self.progress["value"] = 0
             self.status_label.config(text="Export failed.")
