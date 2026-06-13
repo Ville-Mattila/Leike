@@ -1,0 +1,8 @@
+# PyInstaller / Python build artifacts
+build/
+dist/
+__pycache__/
+*.pyc
+
+# These can contain machine-specific absolute paths
+*.log
