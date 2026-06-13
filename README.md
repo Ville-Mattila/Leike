@@ -38,10 +38,14 @@ Crop offsets/dimensions are snapped to even numbers as H.264 requires.
 Source is a single file: `video_trim_crop.py` (Python 3 + tkinter).
 
 - Run from source: `python video_trim_crop.py` (or `Run.bat`)
-- Rebuild the exe: `Build-exe.bat` (needs `pip install tkinterdnd2 pyinstaller`)
+- Rebuild the exe: `Build-exe.bat`
+  (needs `pip install tkinterdnd2 sv-ttk pyinstaller`)
 
-Drag-and-drop is provided by **tkinterdnd2**; without it the app still
-works via the *Open video…* button.
+The app uses a native-looking dark theme on Windows — **sv-ttk** (Sun Valley /
+Windows 11 Fluent) for the widgets, plus DWM calls for a dark title bar whose
+caption colour matches the window. Drag-and-drop is provided by **tkinterdnd2**.
+Both are optional: without them the app still runs (button-only, with a
+hand-rolled dark fallback theme).
 
 ## License
 
