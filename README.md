@@ -67,6 +67,9 @@ ffmpeg — install it with your package manager first
 - **Overlays:** a text caption, an image watermark, or burned-in subtitles.
 - **Audio:** mute, set volume, or export audio only.
 - **Frame grab** — save the current preview frame as a still image.
+- **About dialog** (header button) with the app and ffmpeg versions, license
+  info, and a manual **Check for updates** that compares against the latest
+  GitHub release.
 - Remembers your settings between runs, keyboard shortcuts, and a native
   dark title bar.
 
