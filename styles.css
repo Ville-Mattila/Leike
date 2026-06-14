@@ -193,6 +193,18 @@ section { position: relative; }
 }
 .scroll-cue span { width: 4px; height: 8px; border-radius: 2px; background: var(--gold); }
 
+/* Mobile hero: let it grow with its content instead of pinning the marquee
+   and scroll-cue at fixed offsets (which overlapped the buttons). */
+@media (max-width: 768px) {
+  .hero { min-height: auto; padding-top: 116px; padding-bottom: 56px; }
+  .hero-cta { flex-direction: column; width: 100%; max-width: 360px; }
+  .hero-cta .btn { width: 100%; }
+  .marquee {
+    position: static; align-self: stretch; bottom: auto; margin-top: 48px;
+  }
+  .scroll-cue { display: none; }
+}
+
 /* ============================================================ SHOWCASE */
 .showcase { padding: clamp(80px, 14vh, 180px) clamp(20px, 5vw, 56px) clamp(60px, 10vh, 120px);
   max-width: var(--maxw); margin: 0 auto; }
