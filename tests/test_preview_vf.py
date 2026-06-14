@@ -29,9 +29,10 @@ def test_grayscale_denoise_sharpen(leike):
     assert "hue=s=0" in vf and "hqdn3d" in vf and "unsharp" in vf
 
 
-def test_text_overlay(leike):
+def test_text_not_in_mpv_vf(leike):
+    # mpv can't do drawtext; text previews on the still, not the live vf
     vf, _ = vf_props(leike, text="Hello")
-    assert "drawtext=" in vf and "textfile=" in vf
+    assert "drawtext" not in vf
 
 
 def test_fades_use_absolute_timeline(leike):
@@ -41,9 +42,10 @@ def test_fades_use_absolute_timeline(leike):
     assert "fade=t=out:st=6.50:d=1.50" in vf
 
 
-def test_watermark_bridges_movie_source(leike):
+def test_watermark_not_in_mpv_vf(leike):
+    # watermark overlay previews on the still (ffmpeg), not the mpv vf
     vf, _ = vf_props(leike, watermark_path="logo.png", watermark_pos="br")
-    assert "movie=" in vf and "overlay=" in vf
+    assert "movie=" not in vf and "overlay=" not in vf
 
 
 def test_audio_props(leike):

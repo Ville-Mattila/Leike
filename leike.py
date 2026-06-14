@@ -407,13 +407,15 @@ def build_preview_vf(s):
       props - dict of mpv properties applied directly: speed, volume, mute,
               and sub-file.
 
-    Only the single-pass, live-previewable subset is included. Reverse,
-    boomerang and stabilize are omitted (not live-previewable); scale is
-    omitted (mpv fits the video to the window); speed/volume/mute/subs are
-    mpv properties (so audio stays in sync) rather than filters.
+    Only filters mpv accepts in its `vf` property are included: crop,
+    orientation, colour/denoise/sharpen, and fades. Text (drawtext) and the
+    watermark overlay are deliberately excluded — this libmpv build has no
+    drawtext filter and overlays don't compose cleanly in `vf`; both preview
+    on the editing still (ffmpeg) and apply on export. Reverse, boomerang and
+    stabilize are omitted (not live-previewable); scale is omitted (mpv fits
+    the window); speed/volume/mute/subtitles are mpv properties.
     """
-    chain = (_crop_filter(s) + _orient_filters(s) + _adjust_filters(s)
-             + _drawtext_filter(s))
+    chain = (_crop_filter(s) + _orient_filters(s) + _adjust_filters(s))
 
     # Fades, absolute to the source timeline (mpv plays from s.start, so PTS
     # are source-absolute — unlike export, which input-seeks and resets PTS).
@@ -425,16 +427,6 @@ def build_preview_vf(s):
         chain.append(f"fade=t=out:st={max(0.0, s.end - fo):.2f}:d={fo:.2f}")
 
     vf = ",".join(chain)
-
-    # Watermark image, merged via a lavfi movie source bridge.
-    wm = getattr(s, "watermark_path", None)
-    if wm:
-        pos = {"tl": "10:10", "tr": "W-w-10:10",
-               "bl": "10:H-h-10", "br": "W-w-10:H-h-10"}.get(
-                   getattr(s, "watermark_pos", "br"), "W-w-10:H-h-10")
-        pre = vf if vf else "null"
-        vf = (f"{pre}[v];movie='{_ff_escape_path(wm)}'[wm];"
-              f"[v][wm]overlay={pos}")
 
     props = {}
     sp = getattr(s, "speed", 1.0) or 1.0
@@ -1389,6 +1381,10 @@ class App(BaseTk):
 
     def _update_nonlive_note(self, s):
         skipped = []
+        if (getattr(s, "text", "") or "").strip():
+            skipped.append("text")
+        if getattr(s, "watermark_path", None):
+            skipped.append("watermark")
         if getattr(s, "stabilize", False):
             skipped.append("stabilize")
         if getattr(s, "reverse", False):
@@ -1937,25 +1933,35 @@ class App(BaseTk):
             return
         self._preview_token += 1
         token = self._preview_token
-        # Build the filter chain on the main thread (tk vars aren't
-        # thread-safe), then hand the finished -vf string to the worker.
-        vf = self._still_vf()
+        # Build the ffmpeg command on the main thread (tk vars aren't
+        # thread-safe), then hand the finished argv to the worker.
+        cmd = self._still_cmd(t)
         threading.Thread(
-            target=self._extract_frame, args=(t, token, vf), daemon=True).start()
+            target=self._extract_frame, args=(token, cmd), daemon=True).start()
 
-    def _still_vf(self):
-        """-vf for the still preview: geometry-safe effects + scale-to-fit."""
-        chain = build_still_vf(self._settings("preview.png"))
-        chain.append(f"scale={self.disp_w}:{self.disp_h}")
-        return ",".join(chain)
+    def _still_cmd(self, t):
+        """ffmpeg argv to render the still preview at time t: geometry-safe
+        effects + text/subtitles, plus the watermark overlay when set."""
+        s = self._settings("preview.png")
+        chain = build_still_vf(s)            # adjust + drawtext + subtitles
+        scale = f"scale={self.disp_w}:{self.disp_h}"
+        cmd = [FFMPEG, "-y", "-ss", f"{max(0.0, t):.3f}", "-i", self.input_path]
+        wm = getattr(s, "watermark_path", None)
+        if wm and os.path.exists(wm):
+            pos = {"tl": "10:10", "tr": "W-w-10:10",
+                   "bl": "10:H-h-10", "br": "W-w-10:H-h-10"}.get(
+                       getattr(s, "watermark_pos", "br"), "W-w-10:H-h-10")
+            pre = ",".join(chain) if chain else "null"
+            fc = f"[0:v]{pre}[base];[base][1:v]overlay={pos},{scale}[out]"
+            cmd += ["-i", wm, "-filter_complex", fc, "-map", "[out]"]
+        else:
+            cmd += ["-vf", ",".join(chain + [scale])]
+        cmd += ["-frames:v", "1", "-update", "1", self._tmp_png]
+        return cmd
 
-    def _extract_frame(self, t, token, vf):
+    def _extract_frame(self, token, cmd):
+        run_capture(cmd)
         out = self._tmp_png
-        run_capture([
-            FFMPEG, "-y", "-ss", f"{max(0.0, t):.3f}", "-i", self.input_path,
-            "-frames:v", "1", "-update", "1",
-            "-vf", vf, out,
-        ])
         if token != self._preview_token:
             return  # a newer request superseded this one
         if os.path.exists(out):
