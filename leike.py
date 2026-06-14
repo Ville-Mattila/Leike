@@ -738,6 +738,87 @@ def _combine_target(clips, scale_cap=None):
     return max(2, W), max(2, H), max(fpss)
 
 
+def _concat_filtergraph(clips, g, W, H, F):
+    """filter_complex joining clips on a W×H @F canvas (blurred fill), then the
+    global recipe g on the joined stream. Returns (graph, vlabel, alabel);
+    alabel is None when audio is dropped (g.mute)."""
+    parts = []
+    n = len(clips)
+    for i, c in enumerate(clips):
+        pre = ""
+        if c.crop:
+            x, y, w, h = c.crop
+            pre = f"crop={even(w)}:{even(h)}:{even(x)}:{even(y)},"
+        parts.append(
+            f"[{i}:v]{pre}split=2[bg{i}][fg{i}];"
+            f"[bg{i}]scale={W}:{H}:force_original_aspect_ratio=increase,"
+            f"crop={W}:{H},gblur=sigma=20[bgb{i}];"
+            f"[fg{i}]scale={W}:{H}:force_original_aspect_ratio=decrease[fgs{i}];"
+            f"[bgb{i}][fgs{i}]overlay=(W-w)/2:(H-h)/2,"
+            f"setsar=1,fps={F:g},format=yuv420p[v{i}]")
+    muted = getattr(g, "mute", False)
+    if not muted:
+        for i, c in enumerate(clips):
+            if c.has_audio:
+                parts.append(f"[{i}:a]aresample=async=1:first_pts=0[a{i}]")
+            else:
+                d = max(0.001, c.end - c.start)
+                parts.append(
+                    f"anullsrc=channel_layout=stereo:sample_rate=48000,"
+                    f"atrim=0:{d:.3f},asetpts=PTS-STARTPTS[a{i}]")
+    if muted:
+        joins = "".join(f"[v{i}]" for i in range(n))
+        parts.append(f"{joins}concat=n={n}:v=1:a=0[vc]")
+        alabel = None
+    else:
+        joins = "".join(f"[v{i}][a{i}]" for i in range(n))
+        parts.append(f"{joins}concat=n={n}:v=1:a=1[vc][ac]")
+        alabel = "[ac]"
+
+    speed = getattr(g, "speed", 1.0) or 1.0
+    total = sum(max(0.001, c.end - c.start) for c in clips) / speed
+    vchain = _orient_filters(g) + _adjust_filters(g) + _speed_filter(g)
+    fi = getattr(g, "fade_in", 0.0) or 0.0
+    fo = getattr(g, "fade_out", 0.0) or 0.0
+    if fi > 0:
+        vchain.append(f"fade=t=in:st=0:d={fi:.2f}")
+    if fo > 0:
+        vchain.append(f"fade=t=out:st={max(0.0, total - fo):.2f}:d={fo:.2f}")
+    vchain += _drawtext_filter(g) + _subtitles_filter(g)
+    vchain.append("format=yuv420p")          # final pixfmt; also pins label [v]
+    parts.append(f"[vc]{','.join(vchain)}[v]")
+    vlabel = "[v]"
+    if alabel:
+        af = _af_chain(g)
+        if af:
+            parts.append(f"[ac]{','.join(af)}[a]")
+            alabel = "[a]"
+    return ";".join(parts), vlabel, alabel
+
+
+def build_concat_commands(clips, g):
+    """Join `clips` into one output. g supplies the global recipe + output_path /
+    fmt / crf / scale_cap / hw. Combine targets mp4 or webm. Returns [cmd]."""
+    W, H, F = _combine_target(clips, getattr(g, "scale_cap", None))
+    graph, vlabel, alabel = _concat_filtergraph(clips, g, W, H, F)
+    inputs = []
+    for c in clips:
+        d = max(0.001, c.end - c.start)
+        inputs += ["-ss", f"{c.start:.3f}", "-t", f"{d:.3f}", "-i", c.path]
+    cmd = [FFMPEG, "-y", *inputs, "-filter_complex", graph, "-map", vlabel]
+    if alabel:
+        cmd += ["-map", alabel]
+    if g.fmt == "webm":
+        cmd += ["-c:v", "libvpx-vp9", "-crf", str(g.crf), "-b:v", "0"]
+        cmd += (["-c:a", "libopus", "-b:a", "128k"] if alabel else ["-an"])
+    else:  # mp4
+        cmd += _venc(g) + ["-pix_fmt", "yuv420p"]
+        cmd += (["-c:a", "aac", "-b:a", "128k"] if alabel else ["-an"])
+        cmd += ["-movflags", "+faststart"]
+    cmd += [g.output_path]
+    return [cmd]
+
+
 def build_commands(s):
     """Return a list of ffmpeg command arg-lists (one or more passes)."""
     dur = max(0.001, s.end - s.start)
