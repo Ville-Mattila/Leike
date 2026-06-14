@@ -25,3 +25,10 @@ def test_playback_symbols_exist(leike):
     # playback is optional; the flag, wrapper, and pure helper always exist
     assert "HAS_MPV" in leike
     assert "Player" in leike and "build_preview_vf" in leike
+
+
+def test_transport_controls_exist(app):
+    # transport widgets are present regardless of mpv availability
+    assert app.play_btn is not None and app.stop_btn is not None
+    assert hasattr(app, "loop_play_var")
+    assert app.video_frame is not None

@@ -1102,6 +1102,14 @@ class App(BaseTk):
         self.canvas.bind("<Configure>", self._on_canvas_resize)
         self._draw_drop_hint()
 
+        # mpv render surface, stacked under the canvas; raised in Play mode.
+        self.video_frame = tk.Frame(left, bg=CANVAS_BG, highlightthickness=1,
+                                    highlightbackground=CANVAS_BORDER)
+        self.video_frame.grid(row=0, column=0, sticky="nsew")
+        self.video_frame.lower()       # Edit mode: canvas on top by default
+        self.player = None             # created lazily on first play
+        self.playing = False
+
         scrub = ttk.Frame(left)
         scrub.grid(row=1, column=0, sticky="ew", pady=(6, 0))
         scrub.columnconfigure(1, weight=1)
@@ -1124,6 +1132,7 @@ class App(BaseTk):
         self.grab_btn = ttk.Button(left, text="Grab frame",
                                    command=self.grab_frame, state="disabled")
         self.grab_btn.grid(row=4, column=0, sticky="w", pady=(6, 0))
+        self._build_transport(left, row=5)
 
         if HAS_DND:
             for w in (self, self.canvas):
@@ -1226,6 +1235,33 @@ class App(BaseTk):
                                     foreground=MUTED)
         self.trim_label.grid(row=2, column=0, columnspan=6, sticky="w",
                              pady=(3, 0))
+
+    def _build_transport(self, parent, row):
+        bar = ttk.Frame(parent)
+        bar.grid(row=row, column=0, sticky="ew", pady=(8, 0))
+        self.play_btn = ttk.Button(bar, text="▶  Play", width=10,
+                                   command=self.toggle_play, state="disabled")
+        self.play_btn.grid(row=0, column=0)
+        self.stop_btn = ttk.Button(bar, text="■", width=3,
+                                   command=self.stop_play, state="disabled")
+        self.stop_btn.grid(row=0, column=1, padx=(6, 0))
+        self.loop_play_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(bar, text="Loop", variable=self.loop_play_var,
+                        command=self._apply_loop).grid(row=0, column=2,
+                                                       padx=(10, 0))
+        self.play_hint = ttk.Label(bar, text="", foreground=MUTED)
+        self.play_hint.grid(row=0, column=3, padx=(10, 0))
+        if not HAS_MPV:
+            self.play_hint.config(text="Playback needs mpv (libmpv)")
+
+    def toggle_play(self):
+        pass
+
+    def stop_play(self):
+        pass
+
+    def _apply_loop(self):
+        pass
 
     def _build_footer(self, parent, row):
         box = ttk.Frame(parent, padding=(0, 10, 0, 0))
@@ -1684,6 +1720,9 @@ class App(BaseTk):
         self.scrub_var.set(0.0)
         self.export_btn.config(state="normal")
         self.grab_btn.config(state="normal")
+        if HAS_MPV:
+            self.play_btn.config(state="normal")
+            self.stop_btn.config(state="normal")
         self.update_labels()
         self.request_preview(0.0)
         self._build_filmstrip()
