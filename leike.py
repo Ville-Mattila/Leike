@@ -785,8 +785,19 @@ def _concat_filtergraph(clips, g, W, H, F):
     if fo > 0:
         vchain.append(f"fade=t=out:st={max(0.0, total - fo):.2f}:d={fo:.2f}")
     vchain += _drawtext_filter(g) + _subtitles_filter(g)
-    vchain.append("format=yuv420p")          # final pixfmt; also pins label [v]
-    parts.append(f"[vc]{','.join(vchain)}[v]")
+    cur = "[vc]"
+    if vchain:
+        parts.append(f"[vc]{','.join(vchain)}[vg]")
+        cur = "[vg]"
+    wm = getattr(g, "watermark_path", None)
+    if wm:                                    # overlay watermark (input index n)
+        pad = 12
+        pos = {"tl": f"{pad}:{pad}", "tr": f"W-w-{pad}:{pad}",
+               "bl": f"{pad}:H-h-{pad}", "br": f"W-w-{pad}:H-h-{pad}"}
+        parts.append(f"{cur}[{n}:v]overlay="
+                     f"{pos.get(getattr(g, 'watermark_pos', 'br'), pos['br'])}[vo]")
+        cur = "[vo]"
+    parts.append(f"{cur}format=yuv420p[v]")   # final pixfmt; pins label [v]
     vlabel = "[v]"
     if alabel:
         # Combine ignores reverse on both sides (video doesn't reverse either),
@@ -807,6 +818,8 @@ def build_concat_commands(clips, g):
     for c in clips:
         d = max(0.001, c.end - c.start)
         inputs += ["-ss", f"{c.start:.3f}", "-t", f"{d:.3f}", "-i", c.path]
+    if getattr(g, "watermark_path", None):   # extra input at index len(clips)
+        inputs += ["-i", g.watermark_path]
     cmd = [FFMPEG, "-y", *inputs, "-filter_complex", graph, "-map", vlabel]
     if alabel:
         cmd += ["-map", alabel]
@@ -2194,6 +2207,8 @@ class App(BaseTk):
             self.quality_row.grid(row=4, column=0, columnspan=2, sticky="ew",
                                   pady=(0, 6))
         self._update_export_hint()
+        if hasattr(self, "combine_btn"):
+            self._update_multi_ui()
 
     def _update_export_hint(self):
         if not self.input_path:

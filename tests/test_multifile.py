@@ -120,3 +120,17 @@ def test_concat_ignores_reverse(leike):
              Clip("b.mp4", 1920, 1080, 5, end=5)]
     j = " ".join(leike["build_concat_commands"](clips, _g(leike, reverse=True))[0])
     assert "reverse" not in j   # neither video 'reverse' nor audio 'areverse'
+
+def test_concat_watermark_overlay(leike, tmp_path):
+    Clip = leike["Clip"]
+    wm = tmp_path / "logo.png"
+    wm.write_bytes(b"PNG")
+    clips = [Clip("a.mp4", 1920, 1080, 5, end=5),
+             Clip("b.mp4", 1920, 1080, 5, end=5)]
+    cmd = leike["build_concat_commands"](
+        clips, _g(leike, watermark_path=str(wm), watermark_pos="tr"))[0]
+    j = " ".join(cmd)
+    assert str(wm) in j               # watermark added as an input
+    assert "[2:v]overlay=" in j       # overlaid from input index len(clips)==2
+    assert "W-w-12:12" in j           # 'tr' position
+    assert j.rstrip().endswith("out.mp4")  # output still last
