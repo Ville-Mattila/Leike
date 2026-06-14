@@ -55,9 +55,11 @@ ffmpeg — install it with your package manager first
   shows fps / codec / bitrate, and greys out audio controls on silent clips.
 - **Resize / downscale** to common heights, or **fit under a target file
   size** (auto two-pass bitrate).
-- **Formats:** H.264 MP4, WebM (VP9), animated GIF, or MP3 (audio-only).
+- **Formats:** MP4 in **H.264, H.265, or AV1**, WebM (VP9), animated GIF, or
+  MP3 (audio-only).
 - **GPU encoding** (NVENC) — on by default when a compatible GPU is detected,
-  for much faster exports.
+  for much faster exports (H.264 and H.265; AV1 uses the GPU on RTX 40-series,
+  otherwise CPU).
 - **Transforms:** rotate, mirror, change speed, fade in/out, aspect-fill
   (crop or blurred pad), reverse / boomerang, and loop.
 - **Adjustments:** brightness, contrast, saturation, grayscale, denoise,
