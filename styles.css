@@ -231,11 +231,11 @@ section { position: relative; }
   max-width: var(--maxw); margin: 0 auto; }
 .features-head { margin-bottom: clamp(40px, 6vw, 64px); }
 .feature-grid {
-  display: grid; gap: 18px;
-  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  display: grid; gap: 20px;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
 }
 .feature-card {
-  position: relative; padding: 28px 26px 30px; border-radius: 18px;
+  position: relative; padding: 34px 32px 36px; border-radius: 20px;
   background: linear-gradient(180deg, var(--panel), var(--bg-2));
   border: 1px solid var(--border-soft); overflow: hidden;
   transition: transform .4s var(--ease), border-color .4s var(--ease), box-shadow .4s var(--ease);
@@ -251,14 +251,14 @@ section { position: relative; }
 .feature-card:hover::before { transform: scaleX(1); }
 .feature-card .fi {
   display: inline-flex; align-items: center; justify-content: center;
-  width: 50px; height: 50px; border-radius: 13px; margin-bottom: 18px;
+  width: 54px; height: 54px; border-radius: 14px; margin-bottom: 20px;
   background: radial-gradient(circle at 30% 25%, rgba(255,197,81,0.18), rgba(255,197,81,0.04));
   border: 1px solid var(--border); color: var(--gold);
 }
-.feature-card .fi svg { width: 24px; height: 24px; }
-.feature-card h3 { font-family: var(--font-display); font-weight: 600; font-size: 1.18rem;
-  margin-bottom: 8px; letter-spacing: -0.01em; }
-.feature-card p { color: var(--muted); font-size: 0.96rem; }
+.feature-card .fi svg { width: 26px; height: 26px; }
+.feature-card h3 { font-family: var(--font-display); font-weight: 600; font-size: 1.26rem;
+  margin-bottom: 10px; letter-spacing: -0.01em; }
+.feature-card p { color: var(--muted); font-size: 1rem; }
 
 /* ============================================================ DOWNLOAD */
 .download { padding: clamp(70px, 12vh, 150px) clamp(20px, 5vw, 56px) clamp(60px, 10vh, 110px);
