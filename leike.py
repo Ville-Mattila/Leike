@@ -91,8 +91,10 @@ SIZE_TARGETS = [
 # Output formats: label -> ExportSettings.fmt value.
 FORMATS = [
     ("MP4 (H.264)", "mp4"),
-    ("GIF", "gif"),
+    ("MP4 (H.265)", "hevc"),
+    ("MP4 (AV1)", "av1"),
     ("WebM (VP9)", "webm"),
+    ("GIF", "gif"),
 ]
 
 # Speed presets: label -> playback-rate multiplier.
@@ -205,9 +207,10 @@ class ExportSettings:
     crop: tuple | None = None       # (x, y, w, h) in source px
     scale_cap: int | None = None    # longest-side cap, or None for original
     crf: int = 20
-    fmt: str = "mp4"                # mp4 | gif | webm (mp3 arrives in Phase 4)
+    fmt: str = "mp4"                # mp4(H.264) | hevc | av1 | webm | gif
     fast_trim: bool = True          # allow lossless -c copy for trim-only jobs
-    hw: bool = False                # GPU encode (h264_nvenc) instead of libx264
+    hw: bool = False                # GPU encode (NVENC) instead of software
+    av1_nvenc: bool = False         # GPU can do AV1 NVENC (probed at startup)
     gif_fps: int = 15               # frame rate for GIF output
     target_size_mb: float | None = None  # two-pass to hit a max file size (mp4)
     mute: bool = False              # drop the audio track
@@ -374,7 +377,8 @@ def _inputs(s):
     """ffmpeg input section, adding the watermark image as a 2nd input."""
     dur = max(0.001, s.end - s.start)
     base = ["-ss", f"{s.start:.3f}", "-i", s.input_path]
-    if getattr(s, "watermark_path", None) and s.fmt in ("mp4", "webm"):
+    if getattr(s, "watermark_path", None) and \
+            s.fmt in ("mp4", "webm", "hevc", "av1"):
         base += ["-i", s.watermark_path]
     return base + ["-t", f"{dur:.3f}"]
 
@@ -647,10 +651,44 @@ def _is_passthrough(s):
 
 
 def _venc(s):
-    """Video encoder args: GPU (NVENC) or software (libx264)."""
-    if getattr(s, "hw", False):
-        return ["-c:v", "h264_nvenc", "-preset", "p5", "-cq", str(s.crf)]
-    return ["-c:v", "libx264", "-preset", "medium", "-crf", str(s.crf)]
+    """Video-encoder args for the MP4-container formats (h264 / hevc / av1),
+    choosing GPU (NVENC) vs software by s.hw (and s.av1_nvenc for AV1)."""
+    crf = str(s.crf)
+    fmt = getattr(s, "fmt", "mp4")
+    hw = getattr(s, "hw", False)
+    if fmt == "hevc":
+        if hw:
+            return ["-c:v", "hevc_nvenc", "-preset", "p5", "-cq", crf,
+                    "-tag:v", "hvc1"]
+        return ["-c:v", "libx265", "-preset", "medium", "-crf", crf,
+                "-tag:v", "hvc1"]
+    if fmt == "av1":
+        if hw and getattr(s, "av1_nvenc", False):
+            return ["-c:v", "av1_nvenc", "-preset", "p5", "-cq", crf]
+        return ["-c:v", "libsvtav1", "-preset", "6", "-crf", crf]
+    # h264 (fmt == "mp4")
+    if hw:
+        return ["-c:v", "h264_nvenc", "-preset", "p5", "-cq", crf]
+    return ["-c:v", "libx264", "-preset", "medium", "-crf", crf]
+
+
+def _target_size_supported(fmt):
+    """Two-pass target-size (MB fit) is implemented only for MP4 (H.264)."""
+    return fmt == "mp4"
+
+
+def _probe_encoder(name):
+    """True if ffmpeg can actually encode a frame with `name` — a real GPU
+    capability check, not just 'is it compiled in' (e.g. av1_nvenc is listed in
+    full builds but only works on RTX 40-series)."""
+    null = "NUL" if os.name == "nt" else "/dev/null"
+    try:
+        r = run_capture([FFMPEG, "-hide_banner", "-f", "lavfi",
+                         "-i", "color=black:s=64x64:d=0.1",
+                         "-c:v", name, "-f", "null", null])
+        return r.returncode == 0
+    except OSError:
+        return False
 
 
 def _size_target_passes(s):
@@ -857,7 +895,7 @@ def build_commands(s):
     # mp4
     if getattr(s, "stabilize", False):
         return _stabilize_passes(s)
-    if s.target_size_mb:
+    if s.target_size_mb and s.fmt == "mp4":
         return _size_target_passes(s)
     if _is_passthrough(s):
         return [[FFMPEG, "-y", *common, "-c", "copy", "-movflags", "+faststart",
@@ -1119,6 +1157,7 @@ class App(BaseTk):
         self.export_proc = None
         self._cancelled = False
         self.has_nvenc = self._detect_nvenc()
+        self.has_av1_nvenc = _probe_encoder("av1_nvenc")
 
         self._apply_theme()
         self._build_ui()
@@ -1662,9 +1701,10 @@ class App(BaseTk):
         self._update_export_button()
         if multi and self.mode == "combine":
             fmt = dict(FORMATS)[self.fmt_var.get()]
-            if fmt not in ("mp4", "webm") or self.audio_only_var.get():
+            if fmt not in ("mp4", "hevc", "av1", "webm") \
+                    or self.audio_only_var.get():
                 self.status_label.config(
-                    text="Combine exports MP4/WebM — format will be MP4.")
+                    text="Combine exports video — GIF/MP3 will become MP4.")
 
     def _update_export_button(self):
         if not hasattr(self, "export_btn"):
@@ -2240,20 +2280,27 @@ class App(BaseTk):
             return
         s = self._settings("")
         if s.audio_only:
-            self.export_hint.config(text="Audio only (MP3)")
+            text = "Audio only (MP3)"
         elif s.fmt == "gif":
-            self.export_hint.config(text=f"GIF · {s.gif_fps} fps (2-pass palette)")
+            text = f"GIF · {s.gif_fps} fps (2-pass palette)"
         elif s.fmt == "webm":
-            self.export_hint.config(text="WebM (VP9)")
+            text = "WebM (VP9)"
+        elif s.fmt == "hevc":
+            text = "Re-encode: H.265" + (" (GPU)" if s.hw else "")
+        elif s.fmt == "av1":
+            text = "Re-encode: AV1" + (
+                " (GPU)" if (s.hw and s.av1_nvenc) else " (CPU)")
         elif s.target_size_mb:
-            self.export_hint.config(
-                text=f"Target {s.target_size_mb:g} MB (H.264 · 2-pass)")
+            text = f"Target {s.target_size_mb:g} MB (H.264 · 2-pass)"
         elif _is_passthrough(s):
-            self.export_hint.config(text="⚡ Lossless fast trim (no re-encode)")
-        elif s.hw:
-            self.export_hint.config(text="Re-encode: H.264 (GPU)")
+            text = "⚡ Lossless fast trim (no re-encode)"
         else:
-            self.export_hint.config(text="Re-encode: H.264")
+            text = "Re-encode: H.264" + (" (GPU)" if s.hw else "")
+        # Note when a target size is set on a format that can't use it.
+        if s.target_size_mb and (s.audio_only
+                                 or not _target_size_supported(s.fmt)):
+            text += "  ·  target size ignored (MP4 H.264 only)"
+        self.export_hint.config(text=text)
         # Reflect effect/overlay changes in the preview (live graph or still).
         self._refresh_preview()
 
@@ -2786,6 +2833,7 @@ class App(BaseTk):
             scale_cap=dict(SCALE_OPTIONS)[self.scale_var.get()],
             crf=self.crf_var.get(), fmt=dict(FORMATS)[self.fmt_var.get()],
             fast_trim=self.fast_trim_var.get(), hw=self.hw_var.get(),
+            av1_nvenc=self.has_av1_nvenc,
             gif_fps=self.gif_fps_var.get(), target_size_mb=self._target_mb(),
             mute=self.mute_var.get(), volume=self.volume_var.get() / 100.0,
             audio_only=self.audio_only_var.get(),
@@ -2866,9 +2914,13 @@ class App(BaseTk):
             ext, ftypes = ".mp3", [("MP3 audio", "*.mp3")]
         else:
             fmt = dict(FORMATS)[self.fmt_var.get()]
-            ext = {"mp4": ".mp4", "gif": ".gif", "webm": ".webm"}[fmt]
-            ftypes = {"mp4": [("MP4 video", "*.mp4")], "gif": [("GIF", "*.gif")],
-                      "webm": [("WebM video", "*.webm")]}[fmt]
+            ext = {"mp4": ".mp4", "hevc": ".mp4", "av1": ".mp4",
+                   "webm": ".webm", "gif": ".gif"}[fmt]
+            ftypes = {"mp4": [("MP4 video", "*.mp4")],
+                      "hevc": [("MP4 video", "*.mp4")],
+                      "av1": [("MP4 video", "*.mp4")],
+                      "webm": [("WebM video", "*.webm")],
+                      "gif": [("GIF", "*.gif")]}[fmt]
         base = os.path.splitext(os.path.basename(self.input_path))[0]
         out = filedialog.asksaveasfilename(
             title="Export as", defaultextension=ext,
@@ -2913,7 +2965,8 @@ class App(BaseTk):
             ext = ".mp3"
         else:
             fmt = dict(FORMATS)[self.fmt_var.get()]
-            ext = {"mp4": ".mp4", "gif": ".gif", "webm": ".webm"}[fmt]
+            ext = {"mp4": ".mp4", "hevc": ".mp4", "av1": ".mp4",
+                   "webm": ".webm", "gif": ".gif"}[fmt]
         taken = set()
         jobs = []
         for clip in self.clips:
@@ -2979,7 +3032,7 @@ class App(BaseTk):
                     f"This file is gone:\n{c.path}")
                 return
         fmt = dict(FORMATS)[self.fmt_var.get()]
-        if fmt not in ("mp4", "webm"):       # GIF/mp3 not supported for combine
+        if fmt not in ("mp4", "hevc", "av1", "webm"):   # GIF/MP3 -> MP4
             fmt = "mp4"
         ext = ".webm" if fmt == "webm" else ".mp4"
         base = os.path.splitext(os.path.basename(self.clips[0].path))[0]
@@ -2987,8 +3040,8 @@ class App(BaseTk):
             title="Combine & export as", defaultextension=ext,
             initialfile=f"{base}_combined{ext}",
             initialdir=self.out_dir or os.path.dirname(self.clips[0].path),
-            filetypes=([("MP4 video", "*.mp4")] if fmt == "mp4"
-                       else [("WebM video", "*.webm")]))
+            filetypes=([("WebM video", "*.webm")] if fmt == "webm"
+                       else [("MP4 video", "*.mp4")]))
         if not out:
             return
         self.out_dir = os.path.dirname(out)
