@@ -33,6 +33,20 @@
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/lenis@1.1.20/dist/lenis.css" />
 
   <link rel="stylesheet" href="styles.css" />
+
+  <script>
+    /* Hide animated elements before the first paint so they don't flash in
+       before the reveal runs. Skipped for reduced-motion. Safety net: if the
+       main script never initialises, reveal everything so nothing gets stuck. */
+    (function () {
+      var d = document.documentElement;
+      if (window.matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+      d.classList.add("gsap-ready");
+      setTimeout(function () {
+        if (!window.__leikeReady) { d.classList.remove("gsap-ready"); d.classList.add("no-anim"); }
+      }, 2000);
+    })();
+  </script>
 </head>
 <body>
   <!-- Background motifs -->

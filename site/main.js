@@ -5,6 +5,8 @@
 (function () {
   "use strict";
 
+  window.__leikeReady = true; // tells the head-script watchdog init ran
+
   var html = document.documentElement;
   var reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
   var hasGSAP = typeof window.gsap !== "undefined";
