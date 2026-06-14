@@ -801,6 +801,31 @@ def download_engine(spec, dest_dir, progress=None):
             pass
 
 
+def parse_fps(s):
+    """'30000/1001' -> 29.97; None if unparseable."""
+    try:
+        num, den = str(s).split("/")
+        d = float(den)
+        return round(float(num) / d, 2) if d else None
+    except (ValueError, AttributeError, ZeroDivisionError):
+        return None
+
+
+def stream_rotation(stream):
+    """Absolute display rotation (0/90/180/270) from an ffprobe video stream:
+    a Display Matrix side-data entry or the legacy `rotate` tag."""
+    for sd in stream.get("side_data_list", []):
+        if "rotation" in sd:
+            try:
+                return int(round(abs(float(sd["rotation"])))) % 360
+            except (ValueError, TypeError):
+                pass
+    try:
+        return int(round(abs(float(stream.get("tags", {}).get("rotate", 0))))) % 360
+    except (ValueError, TypeError):
+        return 0
+
+
 class Player:
     """Thin, defensive wrapper around an embedded libmpv instance.
 
@@ -1663,23 +1688,40 @@ class App(BaseTk):
         box = ttk.Frame(parent, padding=2)
         box.grid(row=0, column=0, sticky="ew")
         self.mute_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(box, text="Mute (remove audio)", variable=self.mute_var,
-                        command=self._update_export_hint).grid(
-            row=0, column=0, columnspan=2, sticky="w")
+        self.mute_chk = ttk.Checkbutton(
+            box, text="Mute (remove audio)", variable=self.mute_var,
+            command=self._update_export_hint)
+        self.mute_chk.grid(row=0, column=0, columnspan=2, sticky="w")
         ttk.Label(box, text="Volume").grid(row=1, column=0, sticky="w",
                                            pady=(10, 0))
         self.volume_var = tk.IntVar(value=100)
         vrow = ttk.Frame(box)
         vrow.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(2, 0))
-        ttk.Scale(vrow, from_=0, to=200, variable=self.volume_var,
-                  command=self._on_volume, length=150).grid(row=0, column=0)
+        self.volume_scale = ttk.Scale(vrow, from_=0, to=200,
+                                      variable=self.volume_var,
+                                      command=self._on_volume, length=150)
+        self.volume_scale.grid(row=0, column=0)
         self.volume_label = ttk.Label(vrow, text="100%", width=5)
         self.volume_label.grid(row=0, column=1, padx=(6, 0))
         self.audio_only_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(box, text="Export audio only (MP3)",
-                        variable=self.audio_only_var,
-                        command=self._update_export_hint).grid(
-            row=3, column=0, columnspan=2, sticky="w", pady=(10, 0))
+        self.audio_only_chk = ttk.Checkbutton(
+            box, text="Export audio only (MP3)", variable=self.audio_only_var,
+            command=self._update_export_hint)
+        self.audio_only_chk.grid(row=3, column=0, columnspan=2, sticky="w",
+                                 pady=(10, 0))
+        self.no_audio_label = ttk.Label(
+            box, text="This clip has no audio track.", foreground=MUTED)
+
+    def _set_audio_enabled(self, enabled):
+        """Grey out the audio controls when the source has no audio stream."""
+        state = "normal" if enabled else "disabled"
+        for w in (self.mute_chk, self.volume_scale, self.audio_only_chk):
+            w.config(state=state)
+        if enabled:
+            self.no_audio_label.grid_remove()
+        else:
+            self.no_audio_label.grid(row=4, column=0, columnspan=2, sticky="w",
+                                     pady=(10, 0))
 
     def _on_volume(self, _v):
         self.volume_label.config(text=f"{self.volume_var.get()}%")
@@ -1943,14 +1985,22 @@ class App(BaseTk):
         info = self.probe(path)
         if not info:
             messagebox.showerror(
-                "Error",
-                "Could not read this file as a video with ffprobe.")
+                "Error", "Could not read this file as a video.")
             return
         self.input_path = path
-        self.src_w, self.src_h, self.duration = info
+        self.src_w, self.src_h, self.duration = info["w"], info["h"], info["dur"]
+        self.has_audio = info.get("has_audio", True)
+        # Source-info line: dims, length, then fps / codec / bitrate when known.
+        bits = [f"{self.src_w}x{self.src_h}", fmt_time(self.duration)]
+        if info.get("fps"):
+            bits.append(f"{info['fps']:g} fps")
+        if info.get("codec"):
+            bits.append(info["codec"])
+        if info.get("bitrate"):
+            bits.append(f"{round(info['bitrate'] / 1000)} kb/s")
         self.file_label.config(
-            text=f"{os.path.basename(path)}   "
-                 f"({self.src_w}x{self.src_h}, {fmt_time(self.duration)})")
+            text=f"{os.path.basename(path)}   ({', '.join(bits)})")
+        self._set_audio_enabled(self.has_audio)
 
         # Fit the source into the current canvas (recomputed on every resize).
         self._recompute_display()
@@ -1976,29 +2026,45 @@ class App(BaseTk):
         self._build_filmstrip()
 
     def probe(self, path):
-        # Prefer ffprobe (precise JSON); fall back to parsing `ffmpeg -i` so a
-        # bundle can ship ffmpeg.exe alone, without the large ffprobe binary.
+        """Return a metadata dict (w, h in DISPLAY orientation, dur, fps, codec,
+        bitrate, has_audio) or None. Prefers ffprobe (precise JSON, rotation +
+        stream info); falls back to parsing `ffmpeg -i` for the basics."""
         return self._probe_ffprobe(path) or self._probe_ffmpeg(path)
 
     def _probe_ffprobe(self, path):
         try:
-            r = run_capture([
-                FFPROBE, "-v", "error",
-                "-select_streams", "v:0",
-                "-show_entries", "stream=width,height",
-                "-show_entries", "format=duration",
-                "-of", "json", path,
-            ])
+            r = run_capture([FFPROBE, "-v", "error",
+                             "-show_streams", "-show_format",
+                             "-of", "json", path])
         except OSError:
             return None  # ffprobe not present
         if r.returncode != 0:
             return None
         try:
             data = json.loads(r.stdout)
-            stream = data["streams"][0]
-            return (int(stream["width"]), int(stream["height"]),
-                    float(data["format"]["duration"]))
-        except (KeyError, IndexError, ValueError):
+            streams = data.get("streams", [])
+            vid = next((s for s in streams
+                        if s.get("codec_type") == "video"), None)
+            if not vid:
+                return None
+            w, h = int(vid["width"]), int(vid["height"])
+            rot = stream_rotation(vid)
+            if rot in (90, 270):          # store display dimensions
+                w, h = h, w
+            fmt = data.get("format", {})
+            dur = float(fmt.get("duration") or vid.get("duration") or 0) or None
+            if dur is None:
+                return None
+            br = fmt.get("bit_rate") or vid.get("bit_rate")
+            return {
+                "w": w, "h": h, "dur": dur, "rotation": rot,
+                "fps": parse_fps(vid.get("r_frame_rate")),
+                "codec": vid.get("codec_name"),
+                "bitrate": int(br) if br else None,
+                "has_audio": any(s.get("codec_type") == "audio"
+                                 for s in streams),
+            }
+        except (KeyError, IndexError, ValueError, TypeError):
             return None
 
     def _probe_ffmpeg(self, path):
@@ -2013,14 +2079,30 @@ class App(BaseTk):
             dur = (int(m.group(1)) * 3600 + int(m.group(2)) * 60
                    + float(m.group(3)))
         w = h = None
+        codec = None
         for line in text.splitlines():
             if "Video:" in line:
                 d = re.search(r"\b(\d{2,5})x(\d{2,5})\b", line)
+                cm = re.search(r"Video:\s*(\w+)", line)
+                if cm:
+                    codec = cm.group(1)
                 if d:
                     w, h = int(d.group(1)), int(d.group(2))
                     break
         if w and h and dur is not None:
-            return w, h, dur
+            # Rotation from the modern displaymatrix line or legacy rotate tag.
+            rm = re.search(r"rotation of -?(\d+(?:\.\d+)?) degrees", text) \
+                or re.search(r"rotate\s*:\s*(\d+)", text)
+            rot = int(round(abs(float(rm.group(1))))) % 360 if rm else 0
+            if rot in (90, 270):
+                w, h = h, w
+            fm = re.search(r"(\d+(?:\.\d+)?)\s*fps", text)
+            return {
+                "w": w, "h": h, "dur": dur, "rotation": rot,
+                "fps": float(fm.group(1)) if fm else None,
+                "codec": codec, "bitrate": None,
+                "has_audio": "Audio:" in text,
+            }
         return None
 
     # ------------------------------------------------------- preview frames

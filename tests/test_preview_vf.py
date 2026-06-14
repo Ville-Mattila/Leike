@@ -96,3 +96,18 @@ def test_mpv_download_spec_pinned(leike):
     assert spec["url"].startswith("https://")
     assert len(spec["sha256"]) == 64
     assert spec["member"] == "libmpv-2.dll"
+
+
+def test_parse_fps(leike):
+    assert leike["parse_fps"]("30000/1001") == 29.97
+    assert leike["parse_fps"]("25/1") == 25.0
+    assert leike["parse_fps"]("0/0") is None
+    assert leike["parse_fps"](None) is None
+
+
+def test_stream_rotation(leike):
+    sr = leike["stream_rotation"]
+    assert sr({"side_data_list": [{"rotation": -90}]}) == 90
+    assert sr({"side_data_list": [{"rotation": -180}]}) == 180
+    assert sr({"tags": {"rotate": "270"}}) == 270
+    assert sr({}) == 0
