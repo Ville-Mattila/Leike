@@ -909,6 +909,23 @@ class App(BaseTk):
                                   if self.input_path else None))
         self.bind("]", lambda e: (self.set_from_playhead("end")
                                   if self.input_path else None))
+        self.bind("<space>", self._space_play)
+
+    def _space_play(self, _e):
+        # Don't steal space from text fields.
+        if isinstance(self.focus_get(),
+                      (ttk.Entry, tk.Entry, ttk.Spinbox, tk.Spinbox)):
+            return
+        self.toggle_play()
+        return "break"
+
+    def destroy(self):
+        try:
+            if self.player:
+                self.player.destroy()
+        except Exception:
+            pass
+        super().destroy()
 
     def _shortcut_export(self):
         if self.input_path and str(self.export_btn["state"]) == "normal":
@@ -1117,6 +1134,9 @@ class App(BaseTk):
         self.video_frame.lower()       # Edit mode: canvas on top by default
         self.player = None             # created lazily on first play
         self.playing = False
+        self._paused = False
+        self._graph_after = None
+        self._scrub_programmatic = False
 
         scrub = ttk.Frame(left)
         scrub.grid(row=1, column=0, sticky="ew", pady=(6, 0))
@@ -1263,13 +1283,97 @@ class App(BaseTk):
             self.play_hint.config(text="Playback needs mpv (libmpv)")
 
     def toggle_play(self):
-        pass
+        if not HAS_MPV or not self.input_path:
+            return
+        if self.player is None:
+            self.player = Player(self.video_frame.winfo_id())
+            if not self.player.ok:
+                self.play_hint.config(text="Playback unavailable on this system")
+                self.play_btn.config(state="disabled")
+                self.player = None
+                return
+        if not self.playing:
+            self._enter_play_mode()
+        else:
+            self._set_paused(not self._paused)
+
+    def _enter_play_mode(self):
+        self.playing = True
+        self._paused = False
+        self.video_frame.tkraise()
+        s = self._settings("preview.mp4")
+        vf, props = build_preview_vf(s)
+        self.player.load(self.input_path, start=s.start)
+        self.player.set_graph(vf, props)
+        self._apply_loop()
+        self._update_nonlive_note(s)
+        self.player.set_pause(False)
+        self.play_btn.config(text="⏸  Pause")
+        self._poll_playhead()
+
+    def _set_paused(self, paused):
+        self._paused = paused
+        if self.player:
+            self.player.set_pause(paused)
+        self.play_btn.config(text="▶  Play" if paused else "⏸  Pause")
 
     def stop_play(self):
-        pass
+        if not self.playing:
+            return
+        self.playing = False
+        if self.player:
+            self.player.set_pause(True)
+        self.video_frame.lower()       # back to Edit mode (canvas on top)
+        self.play_btn.config(text="▶  Play")
+        self.play_hint.config(text="")
+        self.request_preview(self.start_t)
 
     def _apply_loop(self):
-        pass
+        if not (self.playing and self.player):
+            return
+        if self.loop_play_var.get():
+            self.player.set_ab_loop(self.start_t, self.end_t)
+        else:
+            self.player.set_ab_loop(None, None)
+
+    def _poll_playhead(self):
+        if not (self.playing and self.player and self.player.ok):
+            return
+        t = self.player.time_pos()
+        if t is not None and self.duration:
+            self._scrub_programmatic = True
+            self.scrub_var.set(t)
+            self._scrub_programmatic = False
+            if not self.loop_play_var.get() and t >= self.end_t:
+                self.stop_play()
+                return
+        self.after(33, self._poll_playhead)     # ~30 Hz
+
+    def _refresh_preview_graph(self):
+        if not (self.playing and self.player and self.player.ok):
+            return
+        if self._graph_after:
+            self.after_cancel(self._graph_after)
+        self._graph_after = self.after(150, self._do_refresh_graph)
+
+    def _do_refresh_graph(self):
+        s = self._settings("preview.mp4")
+        vf, props = build_preview_vf(s)
+        self.player.set_graph(vf, props)
+        self._apply_loop()
+        self._update_nonlive_note(s)
+
+    def _update_nonlive_note(self, s):
+        skipped = []
+        if getattr(s, "stabilize", False):
+            skipped.append("stabilize")
+        if getattr(s, "reverse", False):
+            skipped.append("reverse")
+        if getattr(s, "boomerang", False):
+            skipped.append("boomerang")
+        self.play_hint.config(
+            text=("Not shown in preview: " + ", ".join(skipped))
+            if skipped else "")
 
     def _build_footer(self, parent, row):
         box = ttk.Frame(parent, padding=(0, 10, 0, 0))
@@ -1654,6 +1758,8 @@ class App(BaseTk):
             self.export_hint.config(text="Re-encode: H.264 (GPU)")
         else:
             self.export_hint.config(text="Re-encode: H.264")
+        # If we're playing, reflect effect/overlay changes in the live preview.
+        self._refresh_preview_graph()
 
     def cancel_export(self):
         self._cancelled = True
@@ -1789,6 +1895,11 @@ class App(BaseTk):
             return
         self.playhead = float(self.scrub_var.get())
         self.playhead_label.config(text=fmt_time(self.playhead))
+        # During playback: a user drag seeks mpv; ignore our own poll updates.
+        if self.playing:
+            if not self._scrub_programmatic and self.player:
+                self.player.seek(self.playhead)
+            return
         # Debounce: only extract a frame once scrubbing settles.
         if self._scrub_after:
             self.after_cancel(self._scrub_after)
