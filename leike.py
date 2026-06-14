@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import threading
 import tempfile
+import hashlib
 from dataclasses import dataclass
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
@@ -733,6 +734,73 @@ def save_config(cfg):
         pass
 
 
+# Playback engine (libmpv) fetched on demand via the UI button so the app
+# stays small. Pinned to a specific build and verified by SHA-256 before use;
+# sourced from the zhongfly/mpv-winbuild GitHub release.
+MPV_DOWNLOAD = {
+    "url": ("https://github.com/zhongfly/mpv-winbuild/releases/download/"
+            "2026-06-13-7d245fd100/mpv-dev-x86_64-20260613-git-7d245fd100.7z"),
+    "sha256": "aa10af768a93f7e813171a1ae137b1655c12d1d3708b95de7044dfb17699269b",
+    "member": "libmpv-2.dll",
+    "mb": 30,
+}
+
+
+def app_dir():
+    """Directory for downloaded native libs — next to the exe (frozen) or the
+    script. It is on PATH (see the mpv import guard), so a dll dropped here is
+    found by the next `import mpv`."""
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def _sha256_file(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def download_engine(spec, dest_dir, progress=None):
+    """Download spec['url'], verify its SHA-256, and extract spec['member']
+    into dest_dir. Returns (ok, message). The 7z is unpacked with bsdtar
+    (System32 tar handles 7z/BCJ2); a relative archive name + cwd avoids
+    bsdtar parsing the drive letter as a remote host."""
+    arc = os.path.join(dest_dir, "_engine_dl.7z")
+    try:
+        import urllib.request
+        with urllib.request.urlopen(spec["url"], timeout=30) as r:
+            total = int(r.headers.get("Content-Length", 0))
+            done = 0
+            with open(arc, "wb") as f:
+                while True:
+                    chunk = r.read(1 << 16)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+                    done += len(chunk)
+                    if progress and total:
+                        progress(done / total)
+        if _sha256_file(arc) != spec["sha256"]:
+            return False, "Checksum mismatch — discarded."
+        tar = os.path.join(os.environ.get("SystemRoot", r"C:\Windows"),
+                           "System32", "tar.exe")
+        subprocess.run([tar, "-xf", os.path.basename(arc), spec["member"]],
+                       cwd=dest_dir, check=True, creationflags=NO_WINDOW)
+        out = os.path.join(dest_dir, spec["member"])
+        return (True, "Installed.") if os.path.exists(out) else (
+            False, "Could not extract the engine.")
+    except Exception as e:
+        return False, f"Download failed: {e}"
+    finally:
+        try:
+            os.remove(arc)
+        except OSError:
+            pass
+
+
 class Player:
     """Thin, defensive wrapper around an embedded libmpv instance.
 
@@ -1280,10 +1348,54 @@ class App(BaseTk):
         ttk.Checkbutton(bar, text="Loop", variable=self.loop_play_var,
                         command=self._apply_loop).grid(row=0, column=2,
                                                        padx=(10, 0))
+        self.dl_engine_btn = ttk.Button(
+            bar, text=f"⬇  Enable playback (~{MPV_DOWNLOAD['mb']} MB)",
+            command=self._download_playback_engine)
         self.play_hint = ttk.Label(bar, text="", foreground=MUTED)
-        self.play_hint.grid(row=0, column=3, padx=(10, 0))
-        if not HAS_MPV:
-            self.play_hint.config(text="Playback needs mpv (libmpv)")
+        self.play_hint.grid(row=0, column=4, padx=(10, 0))
+        # When libmpv is absent, offer a one-time download instead of a dead end.
+        if not HAS_MPV and os.name == "nt":
+            self.dl_engine_btn.grid(row=0, column=3, padx=(10, 0))
+        elif not HAS_MPV:
+            self.play_hint.config(text="Playback needs libmpv (install mpv)")
+
+    def _download_playback_engine(self):
+        self.dl_engine_btn.config(state="disabled")
+        self.play_hint.config(text="Downloading… 0%")
+
+        def prog(frac):
+            self.after(0, lambda: self.play_hint.config(
+                text=f"Downloading… {int(frac * 100)}%"))
+
+        def work():
+            ok, msg = download_engine(MPV_DOWNLOAD, app_dir(), prog)
+            self.after(0, lambda: self._engine_download_done(ok, msg))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _engine_download_done(self, ok, msg):
+        if ok and self._enable_mpv():
+            self.dl_engine_btn.grid_remove()
+            self.play_hint.config(text="Playback ready")
+            if self.input_path:
+                self.play_btn.config(state="normal")
+                self.stop_btn.config(state="normal")
+        elif ok:
+            self.play_hint.config(text="Installed — restart Leike to play")
+        else:
+            self.play_hint.config(text=msg)
+            self.dl_engine_btn.config(state="normal")
+
+    def _enable_mpv(self):
+        """Bind libmpv after a successful download (it's now on PATH)."""
+        global HAS_MPV, mpv
+        try:
+            import mpv as _mpv
+            mpv = _mpv
+            HAS_MPV = True
+            return True
+        except Exception:
+            return False
 
     def toggle_play(self):
         if not HAS_MPV or not self.input_path:

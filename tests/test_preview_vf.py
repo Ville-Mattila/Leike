@@ -82,3 +82,17 @@ def test_still_vf_excludes_geometry(leike):
                                          rotate=90, flip_h=True))
     j = ",".join(chain)
     assert "crop=" not in j and "transpose" not in j and "hflip" not in j
+
+
+def test_sha256_file(leike, tmp_path):
+    import hashlib
+    p = tmp_path / "x.bin"
+    p.write_bytes(b"leike")
+    assert leike["_sha256_file"](str(p)) == hashlib.sha256(b"leike").hexdigest()
+
+
+def test_mpv_download_spec_pinned(leike):
+    spec = leike["MPV_DOWNLOAD"]
+    assert spec["url"].startswith("https://")
+    assert len(spec["sha256"]) == 64
+    assert spec["member"] == "libmpv-2.dll"
