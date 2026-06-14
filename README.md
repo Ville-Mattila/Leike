@@ -1,6 +1,6 @@
 # Leike
 
-**Leike** (Finnish for *a clip*) — a small, quick Windows app for ffmpeg.
+**Leike** (Finnish for *a clip*) — a small, quick front-end for ffmpeg.
 **Drag in a video; crop, trim, resize, transform, adjust, overlay, and
 convert it — then export.** Defaults to a widely compatible H.264 `.mp4`,
 with WebM, GIF, and MP3 a click away.
