@@ -1471,6 +1471,8 @@ class App(BaseTk):
         self.file_label = ttk.Label(header, text=hint, foreground=MUTED,
                                     anchor="e")
         self.file_label.grid(row=0, column=1, sticky="e")
+        ttk.Button(header, text="About", command=self._show_about).grid(
+            row=0, column=2, sticky="e", padx=(8, 0))
 
         # ---- Body ----
         root = ttk.Frame(self, padding=10)
@@ -2367,6 +2369,140 @@ class App(BaseTk):
         self._update_export_hint()
         if hasattr(self, "mode_lbls"):
             self._update_multi_ui()
+
+    def _ffmpeg_version(self):
+        try:
+            r = run_capture([FFMPEG, "-version"])
+            line = (r.stdout or "").splitlines()[0] if r.stdout else ""
+            return line[:60] if line else "ffmpeg: version unknown"
+        except OSError:
+            return "ffmpeg not found"
+
+    @staticmethod
+    def _open_path(p):
+        try:
+            if os.name == "nt":
+                os.startfile(p)
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", p])
+            else:
+                subprocess.Popen(["xdg-open", p])
+        except OSError:
+            pass
+
+    def _open_licenses(self):
+        base = (os.path.dirname(sys.executable) if getattr(sys, "frozen", False)
+                else os.path.dirname(os.path.abspath(__file__)))
+        groups = [("LICENSE.txt", "LICENSE"),
+                  ("THIRD_PARTY_NOTICES.txt", "THIRD_PARTY_NOTICES.md")]
+        opened = False
+        for names in groups:
+            for n in names:
+                p = os.path.join(base, n)
+                if os.path.exists(p):
+                    self._open_path(p)
+                    opened = True
+                    break
+        if not opened:
+            webbrowser.open(f"{REPO_URL}/blob/main/LICENSE")
+
+    def _check_updates(self):
+        self._update_btn.config(state="disabled")
+        self._update_status.config(text="Checking…", foreground=MUTED)
+        self._download_btn.grid_remove()
+
+        def work():
+            tag = fetch_latest_tag()
+            self.after(0, lambda: self._update_result(tag))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _update_result(self, tag):
+        if getattr(self, "_update_btn", None) and self._update_btn.winfo_exists():
+            self._update_btn.config(state="normal")
+        if not (getattr(self, "_update_status", None)
+                and self._update_status.winfo_exists()):
+            return
+        if not tag:
+            self._update_status.config(
+                text="Couldn't check for updates (no connection?)",
+                foreground=MUTED)
+        elif _is_newer(tag, APP_VERSION):
+            self._update_status.config(
+                text=f"Update available: {tag}", foreground=GOLD)
+            self._download_btn.grid()
+        else:
+            self._update_status.config(
+                text=f"You're on the latest version (v{APP_VERSION}).",
+                foreground=MUTED)
+
+    def _show_about(self):
+        if getattr(self, "_about_win", None) and self._about_win.winfo_exists():
+            self._about_win.lift()
+            self._about_win.focus_force()
+            return
+        win = tk.Toplevel(self, bg=BASE_BG)
+        self._about_win = win
+        win.title("About Leike")
+        win.resizable(False, False)
+        try:
+            if os.path.exists(ICON_FILE):
+                win.iconbitmap(ICON_FILE)
+        except Exception:
+            pass
+        win.transient(self)
+        _dark_titlebar(win)
+
+        pad = ttk.Frame(win, padding=20)
+        pad.grid(sticky="nsew")
+        ttk.Label(pad, text="Leike", font=("Segoe UI", 22, "bold"),
+                  foreground=GOLD, background=BASE_BG).grid(
+            row=0, column=0, sticky="w")
+        ttk.Label(pad, text=f"version {APP_VERSION}", foreground=MUTED).grid(
+            row=1, column=0, sticky="w")
+        ttk.Label(pad, text="A small, quick front-end for ffmpeg.",
+                  foreground=TEXT).grid(row=2, column=0, sticky="w", pady=(2, 12))
+
+        links = ttk.Frame(pad)
+        links.grid(row=3, column=0, sticky="w", pady=(0, 10))
+        ttk.Button(links, text="GitHub",
+                   command=lambda: webbrowser.open(REPO_URL)).grid(row=0, column=0)
+        ttk.Button(links, text="Website",
+                   command=lambda: webbrowser.open(SITE_URL)).grid(
+            row=0, column=1, padx=(8, 0))
+
+        ttk.Label(pad, text=self._ffmpeg_version(), foreground=MUTED).grid(
+            row=4, column=0, sticky="w", pady=(0, 12))
+
+        ttk.Label(pad, text="Leike is MIT-licensed; bundled ffmpeg is GPLv3.",
+                  foreground=TEXT, wraplength=360, justify="left").grid(
+            row=5, column=0, sticky="w")
+        ttk.Button(pad, text="View licenses",
+                   command=self._open_licenses).grid(
+            row=6, column=0, sticky="w", pady=(4, 14))
+
+        upd = ttk.Frame(pad)
+        upd.grid(row=7, column=0, sticky="ew")
+        self._update_btn = ttk.Button(upd, text="Check for updates",
+                                      command=self._check_updates)
+        self._update_btn.grid(row=0, column=0, sticky="w")
+        self._update_status = ttk.Label(upd, text="", foreground=MUTED)
+        self._update_status.grid(row=1, column=0, sticky="w", pady=(4, 0))
+        self._download_btn = ttk.Button(
+            upd, text="⬇  Download", style="Accent.TButton",
+            command=lambda: webbrowser.open(RELEASES_URL))
+        self._download_btn.grid(row=2, column=0, sticky="w", pady=(6, 0))
+        self._download_btn.grid_remove()
+
+        ttk.Button(pad, text="Close", command=win.destroy).grid(
+            row=8, column=0, sticky="e", pady=(16, 0))
+
+        win.bind("<Escape>", lambda _e: win.destroy())
+        win.update_idletasks()
+        x = self.winfo_rootx() + (self.winfo_width() - win.winfo_width()) // 2
+        y = self.winfo_rooty() + (self.winfo_height() - win.winfo_height()) // 3
+        win.geometry(f"+{max(0, x)}+{max(0, y)}")
+        win.grab_set()
 
     def _update_export_hint(self):
         if not self.input_path:
