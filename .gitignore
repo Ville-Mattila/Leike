@@ -16,3 +16,7 @@ __pycache__/
 
 # These can contain machine-specific absolute paths
 *.log
+
+# Bundled native libs fetched per-machine (like ffmpeg, not committed)
+libmpv-2.dll
+*.dll
