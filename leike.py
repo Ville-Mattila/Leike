@@ -97,6 +97,13 @@ FORMATS = [
     ("GIF", "gif"),
 ]
 
+APP_VERSION = "2.5"          # keep in sync with installer/Leike.iss MyAppVersion
+GITHUB_REPO = "Ville-Mattila/Leike"
+SITE_URL = "https://ville-mattila.github.io/Leike/"
+REPO_URL = f"https://github.com/{GITHUB_REPO}"
+RELEASES_URL = f"{REPO_URL}/releases"
+LATEST_API = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+
 # Speed presets: label -> playback-rate multiplier.
 SPEEDS = [("0.25×", 0.25), ("0.5×", 0.5), ("1×", 1.0), ("2×", 2.0), ("4×", 4.0)]
 
@@ -675,6 +682,35 @@ def _venc(s):
 def _target_size_supported(fmt):
     """Two-pass target-size (MB fit) is implemented only for MP4 (H.264)."""
     return fmt == "mp4"
+
+
+def _parse_version(s):
+    """'v2.4.1' / '2.5' -> (2, 4, 1) / (2, 5). Empty tuple on garbage/None."""
+    s = (s or "").strip().lstrip("vV")
+    parts = []
+    for p in s.split("."):
+        m = re.match(r"\d+", p)
+        if not m:
+            break
+        parts.append(int(m.group()))
+    return tuple(parts)
+
+
+def _is_newer(latest, current):
+    """True if version string `latest` is strictly newer than `current`."""
+    a, b = _parse_version(latest), _parse_version(current)
+    n = max(len(a), len(b))
+    a += (0,) * (n - len(a))
+    b += (0,) * (n - len(b))
+    return a > b
+
+
+def _latest_tag_from_json(data):
+    """Extract tag_name from a parsed /releases/latest response, or None."""
+    if isinstance(data, dict):
+        tag = data.get("tag_name")
+        return tag if isinstance(tag, str) and tag else None
+    return None
 
 
 def _format_controls(fmt):
