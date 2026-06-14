@@ -1157,7 +1157,11 @@ class App(BaseTk):
         self.export_proc = None
         self._cancelled = False
         self.has_nvenc = self._detect_nvenc()
-        self.has_av1_nvenc = _probe_encoder("av1_nvenc")
+        # av1_nvenc needs a real test-encode (slow to fail on non-Ada GPUs), so
+        # probe it off the main thread; default False until it finishes — AV1
+        # just uses software libsvtav1 in the meantime.
+        self.has_av1_nvenc = False
+        threading.Thread(target=self._probe_av1_nvenc, daemon=True).start()
 
         self._apply_theme()
         self._build_ui()
@@ -1232,6 +1236,11 @@ class App(BaseTk):
             return "h264_nvenc" in (r.stdout or "")
         except OSError:
             return False
+
+    def _probe_av1_nvenc(self):
+        """Background: confirm the GPU can actually do AV1 NVENC (Ada-only).
+        Writes a plain bool read only at export time — no Tk access here."""
+        self.has_av1_nvenc = _probe_encoder("av1_nvenc")
 
     # --------------------------------------------------------------- theming
     def _apply_theme(self):
