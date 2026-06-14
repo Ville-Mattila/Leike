@@ -1447,6 +1447,7 @@ class App(BaseTk):
         """Redraw the listbox rows + edited markers, keep the active selected."""
         if not hasattr(self, "file_listbox"):
             return
+        self._commit_active()        # so the active row's ✓/✎ reflect live edits
         self.file_listbox.delete(0, "end")
         for c in self.clips:
             mark = ""
@@ -1458,6 +1459,7 @@ class App(BaseTk):
         if 0 <= self.active < len(self.clips):
             self.file_listbox.selection_clear(0, "end")
             self.file_listbox.selection_set(self.active)
+            self.file_listbox.see(self.active)
 
     def _on_list_select(self, _e):
         sel = self.file_listbox.curselection()
@@ -1510,11 +1512,12 @@ class App(BaseTk):
             return
         n = len(self.clips)
         if n >= 2 and self.mode == "batch":
-            self.export_btn.config(text=f"Export {n} files")
+            label = f"Export {n} files"
         elif n >= 2 and self.mode == "combine":
-            self.export_btn.config(text="Combine & export")
+            label = "Combine & export"
         else:
-            self.export_btn.config(text="Export video")
+            label = "Export video"
+        self.export_btn.config(text=f"⬇  {label}")
 
     def _build_transport(self, parent, row):
         bar = ttk.Frame(parent)
