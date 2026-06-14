@@ -69,6 +69,7 @@
     <nav class="nav-links">
       <a href="#features">Features</a>
       <a href="#download">Download</a>
+      <a href="#" id="navChangelog">Changelog</a>
       <a class="nav-gh" href="https://github.com/Ville-Mattila/Leike" target="_blank" rel="noopener">GitHub ↗</a>
     </nav>
   </header>
@@ -154,6 +155,16 @@
           <p>Scrub a live preview with a thumbnail strip. Lossless fast-trim when the cut allows.</p>
         </article>
         <article class="feature-card" data-feature>
+          <span class="fi" data-icon="play"></span>
+          <h3>Built-in playback</h3>
+          <p>Play with audio and a live effect preview — crop, rotation, and colour update as it runs.</p>
+        </article>
+        <article class="feature-card" data-feature>
+          <span class="fi" data-icon="info"></span>
+          <h3>Reads the source</h3>
+          <p>Fixes sideways phone videos, shows fps / codec / bitrate, and detects silent clips.</p>
+        </article>
+        <article class="feature-card" data-feature>
           <span class="fi" data-icon="format"></span>
           <h3>MP4 · WebM · GIF · MP3</h3>
           <p>Export H.264 by default, or switch format in a click — including audio-only.</p>
@@ -212,6 +223,10 @@
         <p class="kicker" data-reveal>Get Leike</p>
         <h2 class="section-title" data-reveal>Download &amp; go.</h2>
         <p class="section-lede" data-reveal>Windows, macOS, and Linux. Links always point to the latest release.</p>
+        <p class="dl-version" data-reveal>
+          <span id="dlVersion" class="dl-version-tag">Latest release</span>
+          <a href="#" id="dlChangelog" class="dl-version-link">What's new ↗</a>
+        </p>
       </div>
 
       <div class="dl-group">
@@ -296,6 +311,18 @@
       Built with ffmpeg — not affiliated with the FFmpeg project.
     </p>
   </footer>
+
+  <!-- ========================= CHANGELOG MODAL ========================= -->
+  <div class="modal" id="changelog" aria-hidden="true">
+    <div class="modal-backdrop" data-close></div>
+    <div class="modal-panel" role="dialog" aria-modal="true" aria-label="Changelog">
+      <button class="modal-close" data-close aria-label="Close">×</button>
+      <h2 class="modal-title">Changelog</h2>
+      <div class="modal-body" id="changelogBody">
+        <p class="modal-loading">Loading releases…</p>
+      </div>
+    </div>
+  </div>
 
   <!-- Scripts -->
   <script src="https://cdn.jsdelivr.net/npm/lenis@1.1.20/dist/lenis.min.js"></script>

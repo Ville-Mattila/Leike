@@ -24,13 +24,18 @@
     stabilize: '<path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/><polyline points="9 12 11 14 15 10"/>',
     grab: '<path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"/><circle cx="12" cy="13" r="4"/>',
     audio: '<polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/><path d="M19.07 4.93a10 10 0 0 1 0 14.14"/>',
-    local: '<rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/>'
+    local: '<rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/>',
+    play: '<polygon points="6 3 20 12 6 21 6 3"/>',
+    info: '<circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/>'
   };
   var SVG_OPEN = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">';
   Array.prototype.forEach.call(document.querySelectorAll(".fi[data-icon]"), function (el) {
     var k = el.getAttribute("data-icon");
     if (ICONS[k]) el.innerHTML = SVG_OPEN + ICONS[k] + "</svg>";
   });
+
+  /* ---- live version line + changelog modal (works with or without GSAP) ---- */
+  initChangelog();
 
   /* ---- split the hero lede into masked words ---- */
   var lede = document.querySelector(".lede[data-split]");
@@ -223,5 +228,122 @@
         }
       });
     });
+  }
+
+  /* ---- changelog modal + live version line ---- */
+  function initChangelog() {
+    var REPO = "Ville-Mattila/Leike";
+    var API = "https://api.github.com/repos/" + REPO;
+    var modal = document.getElementById("changelog");
+    var body = document.getElementById("changelogBody");
+    var verTag = document.getElementById("dlVersion");
+    if (!modal) return;
+    var loaded = false;
+    var backdrop = modal.querySelector(".modal-backdrop");
+    var panel = modal.querySelector(".modal-panel");
+
+    fetch(API + "/releases/latest")
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (rel) {
+        if (rel && verTag) {
+          verTag.textContent = rel.tag_name + " · released " + fmtDate(rel.published_at);
+        }
+      }).catch(function () {});
+
+    function fmtDate(iso) {
+      try {
+        return new Date(iso).toLocaleDateString("en-US",
+          { year: "numeric", month: "short", day: "numeric" });
+      } catch (e) { return ""; }
+    }
+
+    function fail() {
+      body.innerHTML = '<p class="modal-loading">Couldn\'t load releases — ' +
+        '<a href="https://github.com/' + REPO + '/releases" target="_blank" rel="noopener">view on GitHub ↗</a></p>';
+    }
+
+    function load() {
+      fetch(API + "/releases?per_page=20")
+        .then(function (r) { return r.ok ? r.json() : []; })
+        .then(function (rels) {
+          if (!rels || !rels.length) { fail(); return; }
+          body.innerHTML = rels.map(function (rel) {
+            return '<div class="cl-release"><div class="cl-head">' +
+              '<span class="cl-tag">' + esc(rel.tag_name) + '</span>' +
+              '<span class="cl-date">' + fmtDate(rel.published_at) + '</span></div>' +
+              mdToHtml(rel.body || "_No notes._") + '</div>';
+          }).join("");
+        }).catch(fail);
+    }
+
+    function open(e) {
+      if (e) e.preventDefault();
+      modal.classList.add("open");
+      modal.setAttribute("aria-hidden", "false");
+      if (window.lenis) window.lenis.stop();
+      document.addEventListener("keydown", onKey);
+      if (window.gsap) {
+        window.gsap.fromTo(backdrop, { opacity: 0 }, { opacity: 1, duration: 0.3 });
+        window.gsap.fromTo(panel, { opacity: 0, y: 24, scale: 0.98 },
+          { opacity: 1, y: 0, scale: 1, duration: 0.4, ease: "power3.out" });
+      } else { backdrop.style.opacity = 1; panel.style.opacity = 1; }
+      if (!loaded) { loaded = true; load(); }
+    }
+
+    function close() {
+      document.removeEventListener("keydown", onKey);
+      if (window.lenis) window.lenis.start();
+      var done = function () {
+        modal.classList.remove("open");
+        modal.setAttribute("aria-hidden", "true");
+      };
+      if (window.gsap) {
+        window.gsap.to(panel, { opacity: 0, y: 16, duration: 0.22, ease: "power2.in" });
+        window.gsap.to(backdrop, { opacity: 0, duration: 0.22, onComplete: done });
+      } else { done(); }
+    }
+
+    function onKey(e) { if (e.key === "Escape") close(); }
+
+    ["navChangelog", "dlChangelog"].forEach(function (id) {
+      var el = document.getElementById(id);
+      if (el) el.addEventListener("click", open);
+    });
+    Array.prototype.forEach.call(modal.querySelectorAll("[data-close]"),
+      function (el) { el.addEventListener("click", close); });
+  }
+
+  function esc(s) {
+    return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+
+  /* Minimal markdown → HTML for release notes (headings, lists, bold, code,
+     links). Input is escaped first. */
+  function mdToHtml(md) {
+    var h = esc(md).replace(/\r/g, "");
+    h = h.replace(/`([^`]+)`/g, "<code>$1</code>");
+    h = h.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+    h = h.replace(/\*([^*\n]+)\*/g, "<em>$1</em>");
+    h = h.replace(/\[([^\]]+)\]\(([^)]+)\)/g,
+      '<a href="$2" target="_blank" rel="noopener">$1</a>');
+    var out = [], inList = false;
+    h.split("\n").forEach(function (line) {
+      var hm = line.match(/^(#{1,4})\s+(.*)$/);
+      if (hm) {
+        if (inList) { out.push("</ul>"); inList = false; }
+        var lvl = Math.min(hm[1].length + 1, 5);
+        out.push("<h" + lvl + ">" + hm[2] + "</h" + lvl + ">");
+      } else if (/^\s*[-*]\s+/.test(line)) {
+        if (!inList) { out.push("<ul>"); inList = true; }
+        out.push("<li>" + line.replace(/^\s*[-*]\s+/, "") + "</li>");
+      } else if (line.trim() === "") {
+        if (inList) { out.push("</ul>"); inList = false; }
+      } else {
+        if (inList) { out.push("</ul>"); inList = false; }
+        out.push("<p>" + line + "</p>");
+      }
+    });
+    if (inList) out.push("</ul>");
+    return out.join("\n");
   }
 })();
