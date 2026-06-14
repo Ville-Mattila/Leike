@@ -18,6 +18,7 @@ import subprocess
 import threading
 import tempfile
 import hashlib
+import webbrowser
 from dataclasses import dataclass
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
@@ -713,6 +714,18 @@ def _latest_tag_from_json(data):
     return None
 
 
+def fetch_latest_tag(url=LATEST_API, timeout=8):
+    """Return the latest release tag (e.g. 'v2.5') or None on any error
+    (offline, timeout, rate-limit, malformed JSON)."""
+    import urllib.request
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Leike"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return _latest_tag_from_json(json.loads(r.read().decode("utf-8")))
+    except Exception:
+        return None
+
+
 def _format_controls(fmt):
     """Which Export-tab controls apply to a given output format.
     quality=CRF slider, gif_fps, fast_trim (lossless copy = H.264 only),
@@ -1156,6 +1169,31 @@ class Player:
         self.ok = False
 
 
+def _dark_titlebar(win):
+    """Give a Tk window a dark Windows title bar (DWM immersive dark mode),
+    painted to match BASE_BG. No-op off Windows."""
+    if os.name != "nt":
+        return
+    try:
+        import ctypes
+        win.update_idletasks()
+        hwnd = (ctypes.windll.user32.GetParent(win.winfo_id())
+                or win.winfo_id())
+        for attr in (20, 19):   # 20 = Win10 1903+/Win11, 19 = older builds
+            val = ctypes.c_int(1)
+            if ctypes.windll.dwmapi.DwmSetWindowAttribute(
+                    hwnd, attr, ctypes.byref(val), ctypes.sizeof(val)) == 0:
+                break
+        r, g, b = (int(BASE_BG[i:i + 2], 16) for i in (1, 3, 5))
+        caption = ctypes.c_int(r | (g << 8) | (b << 16))   # 0x00BBGGRR
+        ctypes.windll.dwmapi.DwmSetWindowAttribute(
+            hwnd, 35, ctypes.byref(caption), ctypes.sizeof(caption))
+        win.withdraw()
+        win.deiconify()
+    except Exception:
+        pass
+
+
 class App(BaseTk):
     def __init__(self):
         super().__init__()
@@ -1379,31 +1417,7 @@ class App(BaseTk):
         style.configure("Section.TLabel", foreground=MUTED, background=BASE_BG)
 
     def _apply_dark_titlebar(self):
-        # Make the native Windows title bar dark (DWM immersive dark mode).
-        if os.name != "nt":
-            return
-        try:
-            import ctypes
-            self.update_idletasks()
-            hwnd = (ctypes.windll.user32.GetParent(self.winfo_id())
-                    or self.winfo_id())
-            for attr in (20, 19):  # 20 = Win10 1903+/Win11, 19 = older builds
-                val = ctypes.c_int(1)
-                if ctypes.windll.dwmapi.DwmSetWindowAttribute(
-                        hwnd, attr, ctypes.byref(val),
-                        ctypes.sizeof(val)) == 0:
-                    break
-            # Paint the title bar the same colour as the window background, so
-            # the caption and the content read as one surface (Win 11 22000+).
-            r, g, b = (int(BASE_BG[i:i + 2], 16) for i in (1, 3, 5))
-            caption = ctypes.c_int(r | (g << 8) | (b << 16))  # 0x00BBGGRR
-            ctypes.windll.dwmapi.DwmSetWindowAttribute(
-                hwnd, 35, ctypes.byref(caption), ctypes.sizeof(caption))
-            # Force the title bar to repaint with the new colour.
-            self.withdraw()
-            self.deiconify()
-        except Exception:
-            pass
+        _dark_titlebar(self)
 
     # --------------------------------------------------------- display map
     def _recompute_display(self):
