@@ -451,6 +451,14 @@ def build_preview_vf(s):
     return vf, props
 
 
+def build_still_vf(s):
+    """Geometry-safe effect filters to preview on the editing still frame:
+    colour / denoise / sharpen plus text and subtitle overlays. Crop and
+    orientation are intentionally excluded so the crop box stays valid over the
+    full frame — those preview in Play mode instead."""
+    return _adjust_filters(s) + _drawtext_filter(s) + _subtitles_filter(s)
+
+
 def _blurpad_dims(s):
     sh = even(s.crop[3]) if s.crop else even(s.src_h)
     w, h = even(sh * s.target_aspect), sh
@@ -1138,6 +1146,7 @@ class App(BaseTk):
         self.playing = False
         self._paused = False
         self._graph_after = None
+        self._still_after = None
         self._scrub_programmatic = False
 
         scrub = ttk.Frame(left)
@@ -1350,6 +1359,19 @@ class App(BaseTk):
                 self.stop_play()
                 return
         self.after(33, self._poll_playhead)     # ~30 Hz
+
+    def _refresh_preview(self):
+        """Reflect an effect/overlay change: update the live mpv graph while
+        playing, or re-render the still preview while stopped."""
+        if not self.input_path:
+            return
+        if self.playing and self.player and self.player.ok:
+            self._refresh_preview_graph()
+        else:
+            if self._still_after:
+                self.after_cancel(self._still_after)
+            self._still_after = self.after(
+                150, lambda: self.request_preview(self.playhead))
 
     def _refresh_preview_graph(self):
         if not (self.playing and self.player and self.player.ok):
@@ -1637,7 +1659,7 @@ class App(BaseTk):
             ttk.Scale(box, from_=frm, to=to, variable=var, length=150,
                       command=lambda _v: (lbl.config(
                           text=f"{var.get()}{suffix}"),
-                          self._refresh_preview_graph())).grid(
+                          self._refresh_preview())).grid(
                 row=row, column=1, sticky="ew", padx=(8, 0), pady=(0, 8))
             lbl.grid(row=row, column=2, padx=(6, 0), pady=(0, 8))
 
@@ -1762,8 +1784,8 @@ class App(BaseTk):
             self.export_hint.config(text="Re-encode: H.264 (GPU)")
         else:
             self.export_hint.config(text="Re-encode: H.264")
-        # If we're playing, reflect effect/overlay changes in the live preview.
-        self._refresh_preview_graph()
+        # Reflect effect/overlay changes in the preview (live graph or still).
+        self._refresh_preview()
 
     def cancel_export(self):
         self._cancelled = True
@@ -1915,15 +1937,24 @@ class App(BaseTk):
             return
         self._preview_token += 1
         token = self._preview_token
+        # Build the filter chain on the main thread (tk vars aren't
+        # thread-safe), then hand the finished -vf string to the worker.
+        vf = self._still_vf()
         threading.Thread(
-            target=self._extract_frame, args=(t, token), daemon=True).start()
+            target=self._extract_frame, args=(t, token, vf), daemon=True).start()
 
-    def _extract_frame(self, t, token):
+    def _still_vf(self):
+        """-vf for the still preview: geometry-safe effects + scale-to-fit."""
+        chain = build_still_vf(self._settings("preview.png"))
+        chain.append(f"scale={self.disp_w}:{self.disp_h}")
+        return ",".join(chain)
+
+    def _extract_frame(self, t, token, vf):
         out = self._tmp_png
         run_capture([
             FFMPEG, "-y", "-ss", f"{max(0.0, t):.3f}", "-i", self.input_path,
             "-frames:v", "1", "-update", "1",
-            "-vf", f"scale={self.disp_w}:{self.disp_h}", out,
+            "-vf", vf, out,
         ])
         if token != self._preview_token:
             return  # a newer request superseded this one

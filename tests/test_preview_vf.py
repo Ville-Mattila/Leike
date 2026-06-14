@@ -64,3 +64,19 @@ def test_non_live_effects_omitted(leike):
     assert "vidstab" not in vf and "reverse" not in vf
     # scale is omitted too (mpv fits the window)
     assert "scale=" not in vf
+
+
+def test_still_vf_adjustments_and_overlays(leike):
+    chain = leike["build_still_vf"](make(
+        leike, brightness=0.2, grayscale=True, denoise=True, sharpen=True,
+        text="Hi"))
+    j = ",".join(chain)
+    assert "eq=" in j and "hue=s=0" in j and "hqdn3d" in j and "unsharp" in j
+    assert "drawtext=" in j
+
+
+def test_still_vf_excludes_geometry(leike):
+    chain = leike["build_still_vf"](make(leike, crop=(0, 0, 640, 480),
+                                         rotate=90, flip_h=True))
+    j = ",".join(chain)
+    assert "crop=" not in j and "transpose" not in j and "hflip" not in j
