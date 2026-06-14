@@ -271,7 +271,7 @@
             return '<div class="cl-release"><div class="cl-head">' +
               '<span class="cl-tag">' + esc(rel.tag_name) + '</span>' +
               '<span class="cl-date">' + fmtDate(rel.published_at) + '</span></div>' +
-              mdToHtml(rel.body || "_No notes._") + '</div>';
+              mdToHtml(whatsNew(rel.body || "")) + '</div>';
           }).join("");
         }).catch(fail);
     }
@@ -315,6 +315,19 @@
 
   function esc(s) {
     return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+
+  /* Keep only the "What's new" changes from a release body — drop the tagline,
+     Downloads, License, and any other boilerplate sections. */
+  function whatsNew(md) {
+    var s = (md || "").replace(/\r/g, "").trim();
+    // cut the Downloads / License / Get-Leike sections and everything after
+    s = s.split(/\n#{1,4}\s+(?:downloads|license|get\b|install)/i)[0];
+    // prefer the content under a "What's new" heading
+    var m = s.match(/#{1,4}\s+what['’]?s new[^\n]*\n([\s\S]*)/i);
+    if (m) s = m[1];
+    else s = s.replace(/^\s*\*\*Leike\*\*[^\n]*\n+/i, "");   // strip tagline
+    return s.trim() || "_No notable changes._";
   }
 
   /* Minimal markdown → HTML for release notes (headings, lists, bold, code,
