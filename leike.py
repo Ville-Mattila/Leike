@@ -789,7 +789,9 @@ def _concat_filtergraph(clips, g, W, H, F):
     parts.append(f"[vc]{','.join(vchain)}[v]")
     vlabel = "[v]"
     if alabel:
-        af = _af_chain(g)
+        # Combine ignores reverse on both sides (video doesn't reverse either),
+        # so drop areverse to avoid reversed audio over forward video.
+        af = [f for f in _af_chain(g) if f != "areverse"]
         if af:
             parts.append(f"[ac]{','.join(af)}[a]")
             alabel = "[a]"

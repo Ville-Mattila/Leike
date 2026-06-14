@@ -113,3 +113,10 @@ def test_concat_webm_codecs(leike):
              Clip("b.webm", 1280, 720, 5, end=5)]
     j = " ".join(leike["build_concat_commands"](clips, _g(leike, fmt="webm"))[0])
     assert "libvpx-vp9" in j and "libopus" in j
+
+def test_concat_ignores_reverse(leike):
+    Clip = leike["Clip"]
+    clips = [Clip("a.mp4", 1920, 1080, 5, end=5),
+             Clip("b.mp4", 1920, 1080, 5, end=5)]
+    j = " ".join(leike["build_concat_commands"](clips, _g(leike, reverse=True))[0])
+    assert "reverse" not in j   # neither video 'reverse' nor audio 'areverse'
